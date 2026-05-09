@@ -39,7 +39,7 @@ class SpreadMetrics:
 
 
 class SpreadStabilityEngine:
-    def __init__(self, tick_size: Decimal, min_spread_ticks: int, stable_ms: int, history_seconds: int = 300) -> None:
+    def __init__(self, tick_size: Decimal, min_spread_ticks: int, stable_ms: int, history_seconds: int = 300, stay_ready_ticks: int = 1, ready_hysteresis_ms: int = 12000) -> None:
         self.tick_size = tick_size if tick_size > 0 else Decimal('0.0001')
         self.min_spread_ticks = max(min_spread_ticks, 1)
         self.stable_ms = max(stable_ms, 1)
@@ -53,6 +53,9 @@ class SpreadStabilityEngine:
         self._last_ask: Decimal | None = None
         self._collapse_count = 0
         self._last_above_target = False
+        self._last_ready_ts: float | None = None
+        self.stay_ready_ticks = max(stay_ready_ticks, 1)
+        self.ready_hysteresis_ms = max(ready_hysteresis_ms, 0)
 
     def observe(self, bid: Decimal, ask: Decimal, latency_ms: float) -> SpreadMetrics:
         ts = time()
@@ -82,7 +85,7 @@ class SpreadStabilityEngine:
         bid_ms = int((ts - (self._bid_since or ts)) * 1000)
         ask_ms = int((ts - (self._ask_since or ts)) * 1000)
         ratio = self._stable_ratio()
-        readiness = self._resolve_readiness(above_target, pair_ms, bid_ms, ask_ms, latency_ms)
+        readiness = self._resolve_readiness(above_target, pair_ms, bid_ms, ask_ms, latency_ms, spread_ticks, ts)
 
         return SpreadMetrics(
             snapshot=snapshot,
@@ -116,11 +119,15 @@ class SpreadStabilityEngine:
             return 0.0
         return stable_secs / total_secs
 
-    def _resolve_readiness(self, above_target: bool, pair_ms: int, bid_ms: int, ask_ms: int, latency_ms: float) -> ReadinessState:
+    def _resolve_readiness(self, above_target: bool, pair_ms: int, bid_ms: int, ask_ms: int, latency_ms: float, spread_ticks: Decimal, ts: float) -> ReadinessState:
         latency_ok = latency_ms <= 1000
         stable_now = pair_ms >= self.stable_ms and bid_ms >= self.stable_ms and ask_ms >= self.stable_ms
         if above_target and stable_now and latency_ok:
+            self._last_ready_ts = ts
             return ReadinessState.READY
+        if self._last_ready_ts is not None and spread_ticks >= Decimal(self.stay_ready_ticks):
+            if (ts - self._last_ready_ts) * 1000 <= self.ready_hysteresis_ms:
+                return ReadinessState.READY
         if above_target:
             return ReadinessState.WATCH
         return ReadinessState.NOT_READY
