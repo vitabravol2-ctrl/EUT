@@ -477,10 +477,16 @@ class MainWindow(QMainWindow):
                     self._pending_sell_grace_until = 0.0
                 self._refresh_balances_live('pre_sell_compute')
                 self._refresh_orders_live('pre_sell_compute')
-                exchange_free_euri = Decimal(str(self._balances.get('EURI_free', 0)))
+                exchange_free_euri = floor_to_step(max(Decimal('0'), Decimal(str(self._balances.get('EURI_free', 0)))), step)
                 max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10)))
-                target_sell_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
-                target_sell_qty = min(floor_to_step(max(Decimal('0'), exchange_free_euri), step), target_sell_qty)
+                active_sell_remaining_qty = Decimal('0')
+                if c.sell_order_id and c.sell_order_id in open_order_ids:
+                    os = self._orders_by_id.get(c.sell_order_id, {})
+                    active_sell_remaining_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
+                sell_capacity_total = floor_to_step(exchange_free_euri + active_sell_remaining_qty, step)
+                exposure_target_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
+                target_sell_qty = min(sell_capacity_total, exposure_target_qty)
+                self.logger.log('INFO', f'[SELL] capacity total free={exchange_free_euri} active_remaining={active_sell_remaining_qty} total={sell_capacity_total}')
                 min_resize_delta_cfg = Decimal(str(self.cfg.get('min_resize_delta_euri', 1.0)))
                 min_resize_delta = max(step * Decimal('5'), Decimal(str(self.cfg.get('min_partial_fill_euri', 0))), min_resize_delta_cfg)
                 if c.sell_order_id and c.sell_order_id in open_order_ids and ask > 0 and not sell_grace_active:
@@ -489,7 +495,8 @@ class MainWindow(QMainWindow):
                     working_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
                     qty_delta = abs(target_sell_qty - working_qty)
                     if target_sell_qty > 0 and ask == working_price and qty_delta < min_resize_delta:
-                        self.logger.log('INFO', '[SELL] resize skipped delta too small')
+                        self.logger.log('INFO', '[SELL] keep qty stable locked inventory')
+                        self.logger.log('INFO', '[SELL] resize skipped locked/free oscillation')
                     elif target_sell_qty > 0 and ask != working_price:
                         self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={ask}')
                         self.orders.cancel(c.sell_order_id)
@@ -497,7 +504,7 @@ class MainWindow(QMainWindow):
                         self._active_sell_order_id = None
                         self._pending_sell_order = None
                         self._pending_sell_grace_until = 0.0
-                    elif target_sell_qty > 0 and qty_delta >= min_resize_delta:
+                    elif target_sell_qty > 0 and qty_delta >= min_resize_delta and target_sell_qty < working_qty:
                         self.logger.log('INFO', f'[SELL] resize requested old_qty={working_qty} new_qty={target_sell_qty}')
                         self.logger.log('INFO', '[SELL] cancel for resize')
                         self.orders.cancel(c.sell_order_id)
@@ -508,6 +515,20 @@ class MainWindow(QMainWindow):
                         self._active_sell_order_id = None
                         self._pending_sell_order = None
                         self._pending_sell_grace_until = 0.0
+                    elif target_sell_qty > working_qty and qty_delta >= min_resize_delta:
+                        if exchange_free_euri >= min_resize_delta:
+                            self.logger.log('INFO', f'[SELL] resize requested old_qty={working_qty} new_qty={target_sell_qty}')
+                            self.logger.log('INFO', '[SELL] cancel for resize')
+                            self.orders.cancel(c.sell_order_id)
+                            self.logger.log('INFO', '[SELL] resize confirmed')
+                            self._refresh_balances_live('sell_resize_cancel')
+                            self._refresh_orders_live('sell_resize_cancel')
+                            c.sell_order_id = None
+                            self._active_sell_order_id = None
+                            self._pending_sell_order = None
+                            self._pending_sell_grace_until = 0.0
+                        else:
+                            self.logger.log('INFO', '[SELL] resize up skipped insufficient new free inventory')
                 if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
                     sell_qty = floor_to_step(min(exchange_free_euri, target_sell_qty), step)
                     min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
