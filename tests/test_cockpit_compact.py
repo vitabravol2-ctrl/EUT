@@ -1,10 +1,10 @@
 import pytest
-from decimal import Decimal
 
 QtWidgets = pytest.importorskip('PySide6.QtWidgets', reason='PySide6 GUI deps are unavailable in this environment')
 QApplication = QtWidgets.QApplication
 
 from app.gui.main_window import MainWindow
+from app.core.config import load_config
 
 
 @pytest.fixture(scope='module')
@@ -12,38 +12,36 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-def test_status_badge_mapping(qapp):
+def test_status_strip_includes_market_badges(qapp):
     w = MainWindow()
-    w._set_status_badge('Публичный REST', 'OK')
-    assert 'REST ● OK' in w.s['Публичный REST'].text()
-    w._set_status_badge('Задержка', 'WARN 1000ms')
-    assert 'WARN' in w.s['Задержка'].text()
+    for key in ['REST', 'ACCOUNT', 'PRIVATE', 'TRADING', 'LATENCY', 'HARVEST', 'FSM', 'LAST', 'BID', 'ASK', 'SPREAD', 'TICKS']:
+        assert key in w._status_badges
 
 
-def test_compact_market_and_balance_summary(qapp):
+def test_old_market_panel_removed_and_no_root_scrollarea(qapp):
     w = MainWindow()
-    for k in ['Последняя', 'Bid', 'Ask', 'Спред', 'Тики', 'Lifetime', 'Stable', 'Latency']:
-        assert k in w.m
-    for k in ['USDT total', 'EURI total', 'Оценка всего USDT']:
-        assert k in w.b
-
-
-def test_quick_fill_buttons_and_qty_helper(qapp):
-    w = MainWindow()
-    w.m['Bid'].setText('1.10000000')
-    w.m['Ask'].setText('1.20000000')
-    w._fill_price_bid()
-    assert w.price.text() == '1.10000000'
-    w._fill_price_ask()
-    assert w.price.text() == '1.20000000'
-    w.b['EURI свободно'].setText('5.25000000')
-    w._fill_qty_max_euri()
-    assert w.qty.text() == '5.25000000'
-    w._fill_qty_for_10_usdt()
-    assert Decimal(w.qty.text()) > 0
-
-
-def test_no_root_scrollarea(qapp):
-    w = MainWindow()
+    assert 'Market Summary' not in [g.title() for g in w.findChildren(QtWidgets.QGroupBox)]
     roots = [c for c in w.findChildren(QtWidgets.QScrollArea) if c.parent() == w.centralWidget()]
     assert roots == []
+
+
+def test_trade_settings_save_load(qapp):
+    w = MainWindow()
+    w.trade_mode.setCurrentText('OBSERVER')
+    w.min_spread_ticks.setText('3')
+    w.stable_ms.setText('3500')
+    w.max_order_usdt.setText('15')
+    w.max_active_orders.setText('2')
+    w.risk_guard_enabled.setChecked(True)
+    w.save_trade_settings()
+    cfg = load_config()
+    assert cfg['trade_mode'] == 'OBSERVER'
+    assert cfg['min_spread_ticks'] == 3
+    assert cfg['risk_guard_enabled'] is True
+
+
+def test_manual_place_cancel_still_callable(qapp):
+    w = MainWindow()
+    w.place('BUY')
+    w.cancel_selected()
+    w.cancel_all()

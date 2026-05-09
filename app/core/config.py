@@ -14,7 +14,15 @@ DEFAULT_CONFIG = {
     'symbol': 'EURIUSDT',
     'poll_interval_ms': 1000,
     'request_timeout_sec': 3,
+    'trade_mode': 'MANUAL',
+    'future_mode': 'PAPER',
+    'min_spread_ticks': 2,
+    'stable_ms': 3000,
+    'max_order_usdt': 10.0,
+    'max_active_orders': 1,
+    'risk_guard_enabled': False,
 }
+
 
 
 def load_config() -> dict:
