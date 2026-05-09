@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.logger.log('ERROR', f'[LIVE] runtime error: {e}')
             if hasattr(e, 'code') or hasattr(e, 'message'):
-                self.logger.log('ERROR', f\"[BUY] Binance reject code={getattr(e, 'code', 'n/a')} message={getattr(e, 'message', str(e))}\")
+                self.logger.log('ERROR', f"[BUY] Binance reject code={getattr(e, 'code', 'n/a')} message={getattr(e, 'message', str(e))}")
             old,new=c.transition(CycleState.ERROR, str(e)); self.logger.log('FSM', f'{old.value} -> {new.value} reason={str(e)}')
     def _tick_status(self):
         self._status_badges['SYSTEM'].setText('SYSTEM OK'); self._status_badges['TRADING'].setText(f"TRADING {'ON' if self.cfg.get('trading_enabled',False) else 'OFF'}")
