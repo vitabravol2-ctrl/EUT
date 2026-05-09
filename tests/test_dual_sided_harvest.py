@@ -23,6 +23,16 @@ class _DummyOrders:
         return {'status': 'CANCELED'}
 
 
+class _AlwaysMissingOrders(_DummyOrders):
+    def __init__(self):
+        super().__init__()
+        self.status_calls = 0
+
+    def order_status(self, _order_id):
+        self.status_calls += 1
+        return {'status': 'NEW', 'executedQty': '0', 'price': '1.0000'}
+
+
 @pytest.fixture(scope='module')
 def qapp():
     return QApplication.instance() or QApplication([])
@@ -67,3 +77,47 @@ def test_partial_buy_creates_immediate_sell(qapp):
     w._cycle.buy_avg_price = Decimal('1.1000')
     w._run_live_cycle()
     assert any(side == 'SELL' for side, _, _ in w.orders.placed)
+
+
+def test_fresh_buy_not_reconciled_during_grace_window(qapp):
+    w = _ready_window()
+    w.orders = _AlwaysMissingOrders()
+    w._run_live_cycle()
+    placed_buy_id = w._cycle.buy_order_id
+    assert placed_buy_id is not None
+    w._last_open_orders = []
+    w._run_live_cycle()
+    assert w._cycle.buy_order_id == placed_buy_id
+
+
+def test_fresh_sell_not_reconciled_during_grace_window(qapp):
+    w = _ready_window()
+    w.orders = _AlwaysMissingOrders()
+    w._cycle.buy_filled_qty = Decimal('20')
+    w._cycle.sell_filled_qty = Decimal('0')
+    w._cycle.buy_avg_price = Decimal('1.1000')
+    w._run_live_cycle()
+    placed_sell_id = w._cycle.sell_order_id
+    assert placed_sell_id is not None
+    w._last_open_orders = []
+    w._run_live_cycle()
+    assert w._cycle.sell_order_id == placed_sell_id
+
+
+def test_open_orders_presence_blocks_reconcile(qapp):
+    w = _ready_window()
+    w.orders = _AlwaysMissingOrders()
+    w._cycle.buy_order_id = 42
+    w._last_open_orders = [{'orderId': 42, 'side': 'BUY', 'status': 'NEW'}]
+    w._run_live_cycle()
+    assert w._cycle.buy_order_id == 42
+
+
+def test_no_duplicate_buy_during_grace_window(qapp):
+    w = _ready_window()
+    w.orders = _AlwaysMissingOrders()
+    w._run_live_cycle()
+    assert len([x for x in w.orders.placed if x[0] == 'BUY']) == 1
+    w._last_open_orders = []
+    w._run_live_cycle()
+    assert len([x for x in w.orders.placed if x[0] == 'BUY']) == 1
