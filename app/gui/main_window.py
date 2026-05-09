@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+from decimal import Decimal
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
@@ -61,7 +62,7 @@ QTableWidget::item:selected { background: #243447; color: #e6edf3; }
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('EUT v0.2.6 — Emergency GUI Restore + Keep Real Binance Flow')
+        self.setWindowTitle('EUT v0.2.8 — Stable Manual Trading Terminal + Real Data Cockpit')
         self.setMinimumSize(1280, 720)
         self.resize(1500, 900)
         self.setStyleSheet(DARK_STYLESHEET)
@@ -85,6 +86,16 @@ class MainWindow(QMainWindow):
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._tick_status)
         self._status_timer.start(250)
+        QTimer.singleShot(50, self._startup_connect_flow)
+
+    def _startup_connect_flow(self):
+        self.refresh_market(force=True)
+        self.start_polling()
+        has_keys = bool(self.cfg.get('api_key') and self.cfg.get('api_secret'))
+        if not has_keys:
+            self.logger.log('AUTH', 'API ключи не заданы, приватный контур приостановлен')
+            return
+        self.task_runner.run_task('auth', self.client.get_account)
 
     def _init_services(self):
         self.client = BinanceClient(self.cfg['api_key'], self.cfg['api_secret'], self.cfg['testnet'], self.cfg.get('request_timeout_sec', 3))
@@ -280,47 +291,72 @@ class MainWindow(QMainWindow):
         self.polling.set_private_enabled(enabled and self.runtime.account_auth_state == 'CONNECTED')
         self.runtime.private_polling_state = 'RUNNING' if self.polling.private_enabled else 'PAUSED'
 
-    def refresh_market(self):
+    def refresh_market(self, force: bool = False):
         self.task_runner.run_task('market', lambda: self.market.snapshot())
 
-    def refresh_balances(self):
+    def refresh_balances(self, force: bool = False):
         if self.runtime.account_auth_state != 'CONNECTED':
             return
         self.task_runner.run_task('balances', self.account.balances)
 
-    def refresh_orders(self):
+    def refresh_orders(self, force: bool = False):
         if self.runtime.account_auth_state != 'CONNECTED':
             return
         self.task_runner.run_task('orders', self.orders.open_orders)
 
     def _on_task_success(self, name, payload):
-        if name == 'market':
+        if name == 'auth':
+            self.runtime.set_account_auth('CONNECTED')
+            self._set_private_polling(True)
+            self._load_filters_if_needed()
+            self.refresh_balances(force=True)
+            self.refresh_orders(force=True)
+            self.logger.log('AUTH', 'Binance account connected')
+        elif name == 'market':
             s = payload
-            self.m['Последняя'].setText(str(s.get('last', '0.00000000')))
-            self.m['Bid'].setText(str(s.get('bid', '0.00000000')))
-            self.m['Ask'].setText(str(s.get('ask', '0.00000000')))
-            self.m['Спред'].setText(str(s.get('spread', '0.00000000')))
+            self.runtime.mark_rest_update()
+            self.m['Последняя'].setText(f"{Decimal(str(s.get('last', 0))):.8f}")
+            self.m['Bid'].setText(f"{Decimal(str(s.get('bid', 0))):.8f}")
+            self.m['Ask'].setText(f"{Decimal(str(s.get('ask', 0))):.8f}")
+            self.m['Спред'].setText(f"{Decimal(str(s.get('spread', 0))):.4f}")
+            self.m['Тики'].setText(str(s.get('spread_ticks', 0)))
             self.m['Возраст REST'].setText(str(s.get('rest_age', '-')))
         elif name == 'balances':
             bal = payload
-            self.b['USDT свободно'].setText(str(bal.get('USDT_free', '0.00000000')))
-            self.b['USDT заблокировано'].setText(str(bal.get('USDT_locked', '0.00000000')))
-            self.b['EURI свободно'].setText(str(bal.get('EURI_free', '0.00000000')))
-            self.b['EURI заблокировано'].setText(str(bal.get('EURI_locked', '0.00000000')))
-            self.b['Оценка всего USDT'].setText(str(bal.get('equity_usdt', '0.00000000')))
+            self.b['USDT свободно'].setText(f"{Decimal(str(bal.get('USDT_free', 0))):.8f}")
+            self.b['USDT заблокировано'].setText(f"{Decimal(str(bal.get('USDT_locked', 0))):.8f}")
+            self.b['EURI свободно'].setText(f"{Decimal(str(bal.get('EURI_free', 0))):.8f}")
+            self.b['EURI заблокировано'].setText(f"{Decimal(str(bal.get('EURI_locked', 0))):.8f}")
+            self.b['Оценка всего USDT'].setText(f"{Decimal(str(bal.get('equity_usdt', 0))):.8f}")
             self.runtime.mark_balances_update()
+            self.logger.log('БАЛАНС', f"USDT={self.b['USDT свободно'].text()} EURI={self.b['EURI свободно'].text()}")
         elif name == 'orders':
             data = payload
             self.table.setRowCount(len(data))
             now_ms = int(time.time() * 1000)
             for r, o in enumerate(data):
-                filled = (float(o.get('executedQty', 0)) / max(float(o.get('origQty', 0) or 1), 1e-9)) * 100
+                executed = Decimal(str(o.get('executedQty', 0) or 0))
+                orig = Decimal(str(o.get('origQty', 0) or 0))
+                filled = (executed / orig * Decimal('100')) if orig > 0 else Decimal('0')
                 age = format_age_ms(max(0, now_ms - int(o.get('time', now_ms))))
                 vals = [o.get('orderId'), o.get('side'), o.get('price'), o.get('origQty'), o.get('executedQty'), f'{filled:.1f}%', o.get('status'), age]
                 for c, v in enumerate(vals):
                     self.table.setItem(r, c, QTableWidgetItem(str(v)))
+            self.runtime.mark_orders_update()
+        elif name == 'place_order':
+            side = str(payload.get('side', ''))
+            self.logger.log('ОРДЕР', f'LIMIT {side} отправлен')
+            self.refresh_orders(force=True)
+            self.refresh_balances(force=True)
+        elif name == 'cancel_order':
+            self.logger.log('ОРДЕР', 'Отмена ордера выполнена')
+            self.refresh_orders(force=True)
+            self.refresh_balances(force=True)
 
     def _on_task_error(self, name, err):
+        if name == 'auth':
+            self.runtime.set_account_auth('AUTH_ERROR')
+            self._set_private_polling(False)
         self.logger.log('ОШИБКА', f'{name}: {err}')
 
     def place(self, side):
