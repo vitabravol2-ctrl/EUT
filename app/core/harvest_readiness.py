@@ -4,6 +4,28 @@ from dataclasses import dataclass
 from enum import Enum
 
 
+def _to_float(value, default=0.0):
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if value in {'', '-', '—', 'N/A', 'n/a', 'None', 'none', 'null'}:
+                return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _to_int(value, default=0):
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if value in {'', '-', '—', 'N/A', 'n/a', 'None', 'none', 'null'}:
+                return int(default)
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 class HarvestReadinessState(str, Enum):
     READY = 'READY'
     WATCH = 'WATCH'
@@ -32,9 +54,9 @@ class HarvestReadinessEngine:
         balances = balances or {}
         open_orders = open_orders or []
 
-        spread_ticks = float(market_snapshot.get('spread_ticks', 0.0) or 0.0)
-        lifetime_ms = int(market_snapshot.get('spread_lifetime_ms', 0) or 0)
-        latency_ms = float(execution_metrics.get('latency_ms', 0.0) or 0.0)
+        spread_ticks = _to_float(market_snapshot.get('spread_ticks', 0.0), 0.0)
+        lifetime_ms = _to_int(market_snapshot.get('spread_lifetime_ms', 0), 0)
+        latency_ms = _to_float(execution_metrics.get('latency_ms', 0.0), 0.0)
         queue_quality = str(execution_metrics.get('queue_quality', 'MEDIUM') or 'MEDIUM').upper()
         best_unchanged = bool(market_snapshot.get('best_unchanged', False))
         spread_stability = str(execution_metrics.get('spread_stability', 'BAD') or 'BAD').upper()
@@ -44,7 +66,7 @@ class HarvestReadinessEngine:
         trading_enabled = bool(balances.get('trading_enabled', False))
         read_only = bool(balances.get('read_only', True))
         risk_blocked = bool(balances.get('risk_blocked', False))
-        active_orders_limit = int(balances.get('max_active_orders', 10) or 10)
+        active_orders_limit = max(1, _to_int(balances.get('max_active_orders', 10), 10))
 
         active_orders = [o for o in open_orders if str(o.get('status', 'NEW')).upper() in {'NEW', 'PARTIALLY_FILLED'}]
         too_many_orders = len(active_orders) > active_orders_limit
