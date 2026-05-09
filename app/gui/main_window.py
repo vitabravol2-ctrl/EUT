@@ -107,8 +107,8 @@ class MainWindow(QMainWindow):
         left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_quote=QLabel(); self.ts_max_pos=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_entry_ttl=QLabel(); self.ts_exit_ttl=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
         for n,w in [('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Order quote USDT',self.ts_quote),('Max position EURI',self.ts_max_pos),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Entry order TTL sec',self.ts_entry_ttl),('Exit order TTL sec',self.ts_exit_ttl),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Max cycle age sec',self.ts_cycle_age),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         fl.addRow(self._btn('START HARVEST', self.start_harvest)); fl.addRow(self._btn('STOP HARVEST', self.stop_harvest)); fl.addRow(self._btn('Edit Settings', self.open_trade_settings))
-        cycle=QGroupBox('Harvest Runtime State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-')
-        for n,w in [('Runtime state',self.cs_state),('Target qty',self.cs_target),('BUY filled qty',self.cs_bought),('SELL filled qty',self.cs_sold),('Net inventory',self.cs_open),('Avg buy',self.cs_avg_buy),('Avg sell',self.cs_avg_sell),('Realized PnL',self.cs_pnl),('BUY working qty/price',self.cs_buy_working),('SELL working qty/price',self.cs_sell_working),('Remaining BUY qty',self.cs_buy_remaining),('Remaining SELL qty',self.cs_sell_remaining),('BUY order id',self.cs_buy_order_id),('SELL order id',self.cs_sell_order_id),('BUY status',self.cs_buy_status),('SELL status',self.cs_sell_status),('BUY top status',self.cs_top_bid_status),('SELL top status',self.cs_top_ask_status),('BUY age ms',self.cs_buy_age),('SELL age ms',self.cs_sell_age),('Cycle age',self.cs_cycle_age),('Last fill time',self.cs_last_fill),('Active order',self.cs_order),('Reason',self.cs_reason)]: cf.addRow(n,w)
+        cycle=QGroupBox('Harvest Runtime State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-')
+        for n,w in [('Runtime state',self.cs_state),('Target qty',self.cs_target),('BUY filled qty',self.cs_bought),('SELL filled qty',self.cs_sold),('Net inventory',self.cs_open),('Avg buy',self.cs_avg_buy),('Avg sell',self.cs_avg_sell),('Realized PnL',self.cs_pnl),('BUY working qty/price',self.cs_buy_working),('SELL working qty/price',self.cs_sell_working),('Remaining BUY qty',self.cs_buy_remaining),('Remaining SELL qty',self.cs_sell_remaining),('BUY order id',self.cs_buy_order_id),('SELL order id',self.cs_sell_order_id),('BUY status',self.cs_buy_status),('SELL status',self.cs_sell_status),('BUY top status',self.cs_top_bid_status),('SELL top status',self.cs_top_ask_status),('BUY age ms',self.cs_buy_age),('SELL age ms',self.cs_sell_age),('Available SELL qty',self.cs_avail_sell_qty),('Pending SELL qty',self.cs_pending_sell_qty),('Available BUY USDT',self.cs_avail_buy_usdt),('Inventory exposure %',self.cs_inv_exposure),('Cycle age',self.cs_cycle_age),('Last fill time',self.cs_last_fill),('Active order',self.cs_order),('Reason',self.cs_reason)]: cf.addRow(n,w)
         center=QGroupBox('Open Orders'); cl=QVBoxLayout(center); self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(['orderId','side','price','origQty','executedQty','remainingQty','status','age ms']); self.table.itemSelectionChanged.connect(self._on_order_selected); self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive); cl.addWidget(self.table); self.no_orders=QLabel('No open orders'); cl.addWidget(self.no_orders)
         spread_box=QGroupBox('Spread Stability'); sl=QFormLayout(spread_box)
         self.ss_ticks=QLabel('-'); self.ss_lifetime=QLabel('-'); self.ss_bid=QLabel('-'); self.ss_ask=QLabel('-'); self.ss_ratio=QLabel('-'); self.ss_collapse=QLabel('0'); self.ss_readiness=QLabel('NOT_READY')
@@ -218,8 +218,6 @@ class MainWindow(QMainWindow):
             return False, 'order quote must be > 0'
         if Decimal(str(self._balances.get('USDT_free', 0))) < quote:
             return False, 'USDT balance too low'
-        if len(self._last_open_orders) > 0:
-            return False, 'open orders exist'
         if self._cycle.open_position_qty > 0:
             return False, 'position exists'
         if not self._spread_metrics or self._spread_metrics.state.readiness != ReadinessState.READY:
@@ -299,7 +297,6 @@ class MainWindow(QMainWindow):
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
             net_inv = c.net_inventory_euri
             self.logger.log('INFO', '[RUNTIME] maintaining BUY quote')
-            self.logger.log('INFO', '[RUNTIME] maintaining SELL quote')
 
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
 
@@ -362,9 +359,23 @@ class MainWindow(QMainWindow):
                         self.cs_top_bid_status.setText('TOP')
                         self.logger.log('INFO', '[BUY] top maintained')
 
-            # SELL maintain
-            net_inv = c.net_inventory_euri
-            if net_inv > max_short:
+            # SELL maintain (inventory-driven only)
+            available_sell_qty = floor_to_step(max(Decimal('0'), c.buy_filled_qty - c.sell_filled_qty), step)
+            pending_sell_qty = Decimal('0')
+            if c.sell_order_id:
+                so = self._orders_by_id.get(c.sell_order_id, {})
+                pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
+            available_buy_usdt = Decimal(str(self._balances.get('USDT_free', 0)))
+            max_position = Decimal(str(self.cfg.get('max_position_euri', 0) or 0))
+            exposure = (c.net_inventory_euri / max_position * Decimal('100')) if max_position > 0 else Decimal('0')
+            self.cs_avail_sell_qty.setText(str(available_sell_qty))
+            self.cs_pending_sell_qty.setText(str(pending_sell_qty))
+            self.cs_avail_buy_usdt.setText(f"{available_buy_usdt:.2f}")
+            self.cs_inv_exposure.setText(f"{exposure:.2f}%")
+            if available_sell_qty <= Decimal('0') and not c.sell_order_id:
+                self.cs_top_ask_status.setText('DISABLED_NO_INV')
+                self.logger.log('INFO', '[SELL] skipped: no inventory')
+            elif net_inv > max_short:
                 sell_status = None
                 if c.sell_order_id:
                     try:
@@ -390,7 +401,7 @@ class MainWindow(QMainWindow):
                     c.sell_order_id = None
                     self._active_sell_order_id = None
                 if not c.sell_order_id:
-                    sell_qty = floor_to_step(max(Decimal('0'), c.buy_filled_qty - c.sell_filled_qty), step)
+                    sell_qty = available_sell_qty
                     if sell_qty > 0:
                         min_sell = c.buy_avg_price + tick if c.buy_avg_price > 0 else ask
                         price = floor_to_tick(max(ask, min_sell), tick)
@@ -403,7 +414,7 @@ class MainWindow(QMainWindow):
                 else:
                     os = self._orders_by_id.get(c.sell_order_id, {})
                     working_price = Decimal(str(os.get('price') or ask))
-                    if ask != working_price and ask > 0:
+                    if available_sell_qty > Decimal('0') and ask != working_price and ask > 0:
                         self.cs_top_ask_status.setText('UNDERCUT')
                         self.logger.log('INFO', '[SELL] undercut detected')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
