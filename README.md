@@ -1,21 +1,34 @@
-# EUT v0.1.0 — REST Manual Trading Cockpit
+# EUT v0.1.1 — Cockpit Stability + Runtime Foundation
 
-EUT is a REST-first desktop cockpit for **EURIUSDT** on Binance focused on safe manual LIMIT execution.
+## Architecture
+- `app/core/runtime_state.py`: centralized runtime status model.
+- `app/core/polling_manager.py`: independent market/orders/balances timers with duplicate-start protection.
+- GUI (`app/gui/main_window.py`) consumes runtime state and polling manager, avoiding direct ad-hoc runtime storage.
 
-## Stage scope (v0.1.0)
-- Binance connection and config
-- REST market polling (bookTicker + ticker)
-- Balances view
-- Manual LIMIT BUY/SELL only
-- Open orders + cancel selected/all
-- Log-driven GUI operations
+## Runtime Foundation
+- Runtime status bar: connection, runtime, polling, latency, REST age, orders age, trading state.
+- REST status states: `OK / STALE / ERROR`.
+- Future placeholders already visible: `WS`, `Spread Engine`, `Risk Guard`.
 
-## Philosophy
-- REST-first
-- WebSocket optional in future stages
-- No indicators
-- No AI prediction
-- Execution quality over prediction
+## Polling
+- Independent intervals for market, orders, balances.
+- Safe `start/stop` lifecycle.
+- Duplicate timer protection prevents runaway timers.
+- Stale detection based on last REST timestamp age.
+
+## GUI Philosophy
+- Terminal-style dark cockpit.
+- Stable split layout: top status bar, left market/balances/quick stats, center manual trading, right open orders, bottom logs.
+- Compact widgets, fixed visual rhythm, sortable orders table, categorized logs with millisecond timestamps.
+
+## Future Roadmap (placeholders prepared)
+- Spread analyzer
+- Queue quality
+- Refill detection
+- Cycle statistics
+- Paper trading
+- Execution engine
+- Risk guard
 
 ## Setup
 ```bash
@@ -28,15 +41,3 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
-
-## Security notes
-- Trading Enabled defaults OFF.
-- Read Only mode supported.
-- API secrets are never written to logs.
-- LIMIT-only workflow with pre-send validation.
-
-## Helper script
-```bash
-./scripts/update_and_run.sh
-```
-The script pulls latest changes, runs tests, installs dependencies, and launches the app.
