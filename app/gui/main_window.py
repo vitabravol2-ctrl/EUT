@@ -368,11 +368,17 @@ class MainWindow(QMainWindow):
                 open_ids={int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
                 if c.buy_order_id not in open_ids or status == 'CANCELED':
                     self._active_buy_order_id=None; c.buy_order_id=None; self.cs_buy_status.setText(status); self.cs_top_bid_status.setText('REPRICING')
-                    next_state = CycleState.PLACE_SELL if c.buy_filled_qty > 0 else CycleState.WAIT_READY
-                    old,new=c.transition(next_state,'cancel confirmed'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cancel confirmed')
+                    next_state = c.next_state_after_buy_cancel()
+                    reason = 'buy canceled no fill' if next_state == CycleState.WAIT_READY else 'buy canceled partial fill'
+                    old,new=c.transition(next_state,reason); self.logger.log('FSM', f'{old.value} -> {new.value} reason={reason}')
             if c.state == CycleState.BUY_FILLED: c.transition(CycleState.PLACE_SELL, 'sell next')
             if c.state == CycleState.PLACE_SELL:
-                sell_qty = c.buy_filled_qty - c.sell_filled_qty
+                if not c.can_place_sell():
+                    self.logger.log('RISK', '[RISK] blocked: no position to sell')
+                    old,new=c.transition(CycleState.WAIT_READY, 'no position to sell')
+                    self.logger.log('FSM', f'{old.value} -> {new.value} reason=no position to sell')
+                    return
+                sell_qty = c.open_position_qty
                 if sell_qty <= 0: c.transition(CycleState.ERROR, 'sell qty invalid'); return
                 price = ask
                 self.logger.log('INFO', f'[SELL] placing maker price=current_best_ask qty={sell_qty}')
@@ -414,7 +420,16 @@ class MainWindow(QMainWindow):
                 if status=='FILLED':
                     old,new=c.transition(CycleState.PROFIT_LOCKED,'sell filled'); self.logger.log('INFO','[SELL] filled'); self.logger.log('INFO', f'[PNL] realized={c.realized_pnl}'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell filled')
             if c.state == CycleState.PROFIT_LOCKED:
-                self._cycle_started_at=time.time(); old,new=c.transition(CycleState.WAIT_READY,'cycle done'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done')
+                self.logger.log('INFO', f'[CYCLE] done bought={c.buy_filled_qty} sold={c.sell_filled_qty} pnl={c.realized_pnl}')
+                c.reset_cycle_accounting()
+                self._active_buy_order_id=None; self._active_sell_order_id=None; self._pending_sell_order=None
+                self.cs_buy_status.setText('-'); self.cs_sell_status.setText('-')
+                self.cs_top_bid_status.setText('-')
+                self.logger.log('INFO', '[CYCLE] reset')
+                if self._live_running:
+                    self._cycle_started_at=time.time(); old,new=c.transition(CycleState.WAIT_READY,'cycle done'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done')
+                else:
+                    self._cycle_started_at=time.time(); old,new=c.transition(CycleState.IDLE,'cycle done stopped'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done stopped')
         except Exception as e:
             self.logger.log('ERROR', f'[LIVE] runtime error: {e}')
             if hasattr(e, 'code') or hasattr(e, 'message'):
