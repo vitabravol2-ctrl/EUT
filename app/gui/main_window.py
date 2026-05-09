@@ -39,6 +39,7 @@ from app.core.execution_metrics import (
     last_fill_time_label,
 )
 from app.core.filters import validate_order_from_exchange_info
+from app.core.harvest_readiness import HarvestReadinessEngine, HarvestReadinessState
 from app.core.formatting import format_age_ms
 from app.core.logger import AppLogger
 from app.core.market_service import MarketService
@@ -95,6 +96,11 @@ class MainWindow(QMainWindow):
         self._queue_estimator = QueueQualityEstimator()
         self._spread_stability = 'BAD'
         self._queue_quality = 'MEDIUM'
+        self._last_market_snapshot = {}
+        self._last_open_orders = []
+        self._harvest_engine = HarvestReadinessEngine()
+        self._harvest_result = None
+        self._last_harvest_state = None
 
         self.task_runner = TaskRunner(4, self)
         self.task_runner.signals.success.connect(self._on_task_success)
@@ -151,15 +157,15 @@ class MainWindow(QMainWindow):
         top.setMinimumHeight(90)
         top.setMaximumHeight(110)
         top_l = QGridLayout(top)
-        status_keys = ['Публичный REST', 'Аккаунт', 'Опрос', 'Приватный канал', 'Торговля', 'Только чтение', 'WS', 'Задержка']
+        status_keys = ['Публичный REST', 'Аккаунт', 'Опрос', 'Приватный канал', 'Торговля', 'Только чтение', 'WS', 'Задержка', 'HARVEST']
         for i, k in enumerate(status_keys):
-            top_l.addWidget(QLabel(f'{k}:'), i // 4, (i % 4) * 2)
+            top_l.addWidget(QLabel(f'{k}:'), i // 5, (i % 5) * 2)
             self.s[k] = self._value('-')
-            top_l.addWidget(self.s[k], i // 4, (i % 4) * 2 + 1)
+            top_l.addWidget(self.s[k], i // 5, (i % 5) * 2 + 1)
         self.settings_btn = self._btn('Настройки', self.open_settings)
         self.diag_btn = self._btn('Проверить систему', self.run_diagnostics)
-        top_l.addWidget(self.settings_btn, 2, 6)
-        top_l.addWidget(self.diag_btn, 2, 7)
+        top_l.addWidget(self.settings_btn, 2, 8)
+        top_l.addWidget(self.diag_btn, 2, 9)
         main.addWidget(top)
 
         center_splitter = QSplitter(Qt.Horizontal)
@@ -262,6 +268,14 @@ class MainWindow(QMainWindow):
         right_l.addWidget(activity_box)
         right_l.addWidget(fsm_box)
         right_l.addWidget(exec_box)
+
+        harvest_box = QGroupBox('Harvest Readiness')
+        harvest_f = QFormLayout(harvest_box)
+        for key in ['Harvest state', 'Harvest score', 'Harvest reason', 'Spread OK', 'Stability OK', 'Latency OK', 'Queue OK', 'Entry', 'Exit', 'Suggested']:
+            self.s[key] = self._value('-')
+            harvest_f.addRow(QLabel(key), self.s[key])
+
+        right_l.addWidget(harvest_box)
         right_l.addStretch(1)
 
         center_splitter.addWidget(left_col)
@@ -357,8 +371,10 @@ class MainWindow(QMainWindow):
             spread = Decimal(str(s.get('spread_source', s.get('spread', 0))))
             self._update_spread_panel(spread, s.get('spread_ticks', '-'))
             self.m['Возраст REST'].setText(str(s.get('rest_age', '-')))
+            self._last_market_snapshot = dict(s)
             self._update_execution_metrics(best_unchanged=bool(s.get('best_unchanged', False)))
             self._recalc_equity_total()
+            self._recompute_harvest_readiness()
         elif name == 'balances':
             bal = payload
             self.b['USDT свободно'].setText(f"{Decimal(str(bal.get('USDT_free', 0))):.8f}")
@@ -367,6 +383,7 @@ class MainWindow(QMainWindow):
             self.b['EURI заблокировано'].setText(f"{Decimal(str(bal.get('EURI_locked', 0))):.8f}")
             self.b['Оценка всего USDT'].setText(f"{Decimal(str(bal.get('equity_usdt', 0))):.8f}")
             self.runtime.mark_balances_update()
+            self._recompute_harvest_readiness()
             now = time.time()
             if (now - self._last_balance_log_ts) >= 10:
                 self.logger.log('БАЛАНС', f"USDT={self.b['USDT свободно'].text()} EURI={self.b['EURI свободно'].text()}")
@@ -387,7 +404,9 @@ class MainWindow(QMainWindow):
                 for c, v in enumerate(vals):
                     self.table.setItem(r, c, QTableWidgetItem(str(v)))
             self.runtime.mark_orders_update()
+            self._last_open_orders = list(data)
             self._update_order_activity()
+            self._recompute_harvest_readiness()
         elif name == 'place_order':
             side = str(payload.get('side', ''))
             self._order_reaction_ms = float(payload.get('_reaction_ms', 0.0) or 0.0)
@@ -466,10 +485,67 @@ class MainWindow(QMainWindow):
         if self.runtime.last_latency_ms > self._latency_warning_ms:
             latency = f'{latency} WARNING'
         self.s['Задержка'].setText(latency)
+        self._set_harvest_badge()
         self._refresh_order_ages()
         self._update_order_activity()
         self._update_runtime_fsm()
         self._update_trade_buttons()
+
+
+    def _recompute_harvest_readiness(self):
+        balances_ctx = {
+            'account_connected': self.runtime.account_auth_state == 'CONNECTED',
+            'trading_enabled': self.cfg.get('trading_enabled', False),
+            'read_only': self.cfg.get('read_only', True),
+            'risk_blocked': False,
+            'max_active_orders': 10,
+        }
+        snapshot = dict(self._last_market_snapshot or {})
+        snapshot['spread_lifetime_ms'] = int((time.time() - self._spread_since) * 1000) if self._spread_since else 0
+        execution = {
+            'latency_ms': self.runtime.last_latency_ms,
+            'queue_quality': self._queue_quality,
+            'spread_stability': self._spread_stability,
+        }
+        self._harvest_result = self._harvest_engine.analyze(snapshot, execution, self.filters, balances_ctx, self._last_open_orders)
+        self._update_harvest_panel()
+        self._log_harvest_state_if_changed()
+
+    def _update_harvest_panel(self):
+        if not self._harvest_result:
+            return
+        r = self._harvest_result
+        self.s['Harvest state'].setText(r.state.value)
+        self.s['Harvest score'].setText(str(r.score))
+        self.s['Harvest reason'].setText(', '.join(r.reasons[:2]) if r.reasons else '-')
+        self.s['Spread OK'].setText('YES' if r.spread_ok else 'NO')
+        self.s['Stability OK'].setText('YES' if r.stability_ok else 'NO')
+        self.s['Latency OK'].setText('YES' if r.latency_ok else 'NO')
+        self.s['Queue OK'].setText('YES' if r.queue_ok else 'NO')
+        self.s['Entry'].setText('POSSIBLE' if r.entry_possible else 'NO')
+        self.s['Exit'].setText('POSSIBLE' if r.exit_possible else 'NO')
+        self.s['Suggested'].setText(r.suggested_side)
+
+    def _set_harvest_badge(self):
+        state = self._harvest_result.state.value if self._harvest_result else 'NOT_READY'
+        self.s['HARVEST'].setText(state)
+        color_map = {
+            'READY': '#2ea043',
+            'WATCH': '#d29922',
+            'NOT_READY': '#8b949e',
+            'BLOCKED': '#f85149',
+        }
+        self.s['HARVEST'].setStyleSheet(f"color: {color_map.get(state, '#8b949e')}; font-weight: 700;")
+
+    def _log_harvest_state_if_changed(self):
+        if not self._harvest_result:
+            return
+        state = self._harvest_result.state.value
+        if state == self._last_harvest_state:
+            return
+        self._last_harvest_state = state
+        reason = ', '.join(self._harvest_result.reasons[:2]) if self._harvest_result.reasons else 'no reason'
+        self.logger.log('HARVEST', f'[{state}] {reason}')
 
     def _recalc_total(self):
         try:
