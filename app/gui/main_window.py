@@ -17,14 +17,23 @@ from app.core.market_service import MarketService
 from app.core.order_service import OrderService
 from app.core.polling_manager import PollingManager
 from app.core.runtime_state import RuntimeState
+from app.core.runtime_fsm import FsmState, RuntimeFSM
+from app.core.spread_detector import SpreadDetector
+from app.core.order_manager import OrderManager
+from app.core.fill_tracker import FillTracker
+from app.core.risk_guard import RiskGuard
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('EUT v0.1.1 — Cockpit Stability + Runtime Foundation')
+        self.setWindowTitle('EUT v0.2.0 — Deterministic Spread Harvester')
         self.logger = AppLogger()
         self.cfg = load_config()
         self.runtime = RuntimeState()
+        self.fsm = RuntimeFSM()
+        self.spread_detector = SpreadDetector()
+        self.fill_tracker = FillTracker()
+        self.risk_guard = RiskGuard()
         self._init_services()
         self._build_ui()
         self._status_timer = QTimer(self)
@@ -37,6 +46,7 @@ class MainWindow(QMainWindow):
         self.market = MarketService(self.client, self.cfg['symbol'])
         self.account = AccountService(self.client)
         self.orders = OrderService(self.client, self.cfg['symbol'])
+        self.order_manager = OrderManager(self.orders)
 
     def _build_ui(self):
         root = QWidget(); self.setCentralWidget(root); main = QVBoxLayout(root)
@@ -44,17 +54,17 @@ class MainWindow(QMainWindow):
         main.addWidget(self._top_bar())
         split_v = QSplitter(Qt.Vertical)
         split_h = QSplitter(Qt.Horizontal)
-        left = QWidget(); lv = QVBoxLayout(left); lv.addWidget(self._market_panel()); lv.addWidget(self._balance_panel()); lv.addWidget(self._quick_stats_panel())
-        split_h.addWidget(left); split_h.addWidget(self._manual_panel()); split_h.addWidget(self._orders_panel())
+        left = QWidget(); lv = QVBoxLayout(left); lv.addWidget(self._market_panel()); lv.addWidget(self._spread_panel()); lv.addWidget(self._fsm_panel()); lv.addWidget(self._balance_panel()); lv.addWidget(self._quick_stats_panel())
+        split_h.addWidget(left); split_h.addWidget(self._manual_panel()); split_h.addWidget(self._orders_panel()); split_h.addWidget(self._order_activity_panel())
         split_h.setStretchFactor(0,2); split_h.setStretchFactor(1,2); split_h.setStretchFactor(2,3)
         split_v.addWidget(split_h); split_v.addWidget(self._log_panel()); split_v.setStretchFactor(0,4); split_v.setStretchFactor(1,1)
         main.addWidget(split_v)
 
     def _top_bar(self):
         g = QGroupBox('Runtime Status'); l = QGridLayout(g); self.s={}
-        for i, k in enumerate(['Connection','Runtime','Polling','Latency','REST age','Trading','REST','Orders age','WS','Spread Engine','Risk Guard']):
+        for i, k in enumerate(['FSM state','REST status','Polling','Spread status','Connection','Latency','REST age','Trading','Orders age','Risk Guard']):
             l.addWidget(QLabel(k), i//6, (i%6)*2); v = QLabel('-'); self.s[k]=v; l.addWidget(v, i//6, (i%6)*2+1)
-        self.s['WS'].setText('placeholder'); self.s['Spread Engine'].setText('placeholder'); self.s['Risk Guard'].setText('placeholder')
+        self.s['Risk Guard'].setText('OK')
         return g
     def _market_panel(self):
         g=QGroupBox('Market'); f=QFormLayout(g); self.m={}
@@ -63,6 +73,25 @@ class MainWindow(QMainWindow):
         for t,fn in [('Refresh',self.refresh_market),('Start',self.start_polling),('Stop',self.stop_polling)]:
             b=QPushButton(t); b.clicked.connect(fn); f.addRow(b)
         return g
+
+    def _spread_panel(self):
+        g=QGroupBox('Spread Status'); f=QFormLayout(g); self.sp={}
+        for k in ['spread','spread ticks','spread lifetime','stable']:
+            self.sp[k]=QLabel('-'); f.addRow(k,self.sp[k])
+        return g
+
+    def _fsm_panel(self):
+        g=QGroupBox('Runtime FSM'); f=QFormLayout(g); self.fsm_w={}
+        for k in ['current state','current cycle','last transition','last error']:
+            self.fsm_w[k]=QLabel('-'); f.addRow(k,self.fsm_w[k])
+        return g
+
+    def _order_activity_panel(self):
+        g=QGroupBox('Order Activity'); f=QFormLayout(g); self.oa={}
+        for k in ['active order','alive time','queue age','reprices count']:
+            self.oa[k]=QLabel('-'); f.addRow(k,self.oa[k])
+        return g
+
     def _balance_panel(self):
         g=QGroupBox('Balances'); f=QFormLayout(g); self.b={}
         for k in ['USDT Free','USDT Locked','EURI Free','EURI Locked','Estimated Total USDT']:
@@ -109,7 +138,11 @@ class MainWindow(QMainWindow):
             mid=(s['bid']+s['ask'])/2 if s['ask'] and s['bid'] else 0
             self.m['Last'].setText(f"{s['last']:.4f}"); self.m['Bid'].setText(f"{s['bid']:.4f}"); self.m['Ask'].setText(f"{s['ask']:.4f}"); self.m['MID'].setText(f"{mid:.4f}")
             self.m['Spread'].setText(f"{s['spread']:.4f}"); self.m['Spread ticks'].setText(str(s['spread_ticks']))
+            spread_status = self.spread_detector.evaluate(s['bid'], s['ask'])
+            self.sp['spread'].setText(f"{spread_status.spread:.4f}"); self.sp['spread ticks'].setText(str(spread_status.spread_ticks)); self.sp['spread lifetime'].setText(f"{spread_status.lifetime_ms} ms"); self.sp['stable'].setText('stable' if spread_status.is_stable else 'unstable')
             self.q['Current spread'].setText(f"{s['spread']:.4f}"); self.q['Spread ticks'].setText(str(s['spread_ticks'])); self.q['REST cycles/sec'].setText(str(self.runtime.rest_cycles_per_sec()))
+            self.s['Spread status'].setText('STABLE' if spread_status.is_stable else 'UNSTABLE')
+            self._run_fsm(spread_status)
         except Exception as e:
             self.runtime.mark_error(str(e)); self.logger.log('ERROR', f'market: {e}')
     def refresh_balances(self):
@@ -132,9 +165,12 @@ class MainWindow(QMainWindow):
         except Exception as e: self.logger.log('ERROR',f'orders: {e}')
     def _tick_status(self):
         self.runtime.update_stale(3000)
-        self.s['Connection'].setText(self.runtime.connection_state); self.s['Runtime'].setText('OK' if not self.runtime.last_error else 'WARN'); self.s['Polling'].setText(self.runtime.polling_state)
+        self.s['Connection'].setText(self.runtime.connection_state); self.s['FSM state'].setText(self.fsm.state.value); self.s['Polling'].setText(self.runtime.polling_state)
         self.s['Latency'].setText(f"{int(self.runtime.last_latency_ms)} ms"); self.s['REST age'].setText(f"{self.runtime.age_ms(self.runtime.last_rest_update_ts)} ms")
-        self.s['Trading'].setText('ENABLED' if self.trading_enabled.isChecked() else 'DISABLED'); self.s['REST'].setText(self.runtime.rest_status); self.s['Orders age'].setText(f"{self.runtime.age_ms(self.runtime.last_orders_update_ts)} ms")
+        self.s['Trading'].setText('ENABLED' if self.trading_enabled.isChecked() else 'DISABLED'); self.s['REST status'].setText(self.runtime.rest_status); self.s['Orders age'].setText(f"{self.runtime.age_ms(self.runtime.last_orders_update_ts)} ms")
+        self.fsm_w['current state'].setText(self.fsm.state.value); self.fsm_w['current cycle'].setText(str(self.fsm.cycle)); self.fsm_w['last transition'].setText(self.fsm.last_transition); self.fsm_w['last error'].setText(self.fsm.last_error)
+        active_id = self.order_manager.active_order.get('orderId') if self.order_manager.active_order else '-'
+        self.oa['active order'].setText(str(active_id)); self.oa['alive time'].setText(f"{self.order_manager.alive_time_ms()} ms"); self.oa['queue age'].setText(f"{self.order_manager.alive_time_ms()} ms"); self.oa['reprices count'].setText(str(self.order_manager.reprices_count))
     def place(self, side):
         if not self.trading_enabled.isChecked() or self.read_only.isChecked(): self.logger.log('ERROR','Trading disabled/read-only mode'); return
         ok,msg = validate_order(self.price.text(), self.qty.text(), tick_size='0.0001', step_size='0.1', min_qty='0.1', min_notional='5')
