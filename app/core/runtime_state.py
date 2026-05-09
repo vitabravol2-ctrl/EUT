@@ -80,3 +80,7 @@ class RuntimeState:
     @connection_state.setter
     def connection_state(self, value: str) -> None:
         self.account_auth_state = value
+
+    @property
+    def last_public_latency_ms(self) -> str:
+        return f'{int(max(self.last_latency_ms, 0.0))}ms'
