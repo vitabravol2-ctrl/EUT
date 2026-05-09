@@ -73,6 +73,12 @@ class MainWindow(QMainWindow):
         self.settings_dialog = None
         self.filters = None
         self._last_market = None
+        self._selected_order_id = None
+        self._orders_by_id = {}
+        self._last_balance_log_ts = 0.0
+        self._last_market_log = None
+        self._spread_value = None
+        self._spread_since = None
 
         self.task_runner = TaskRunner(4, self)
         self.task_runner.signals.success.connect(self._on_task_success)
@@ -182,6 +188,7 @@ class MainWindow(QMainWindow):
         orders_l = QVBoxLayout(orders_box)
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(['ID', 'Сторона', 'Цена', 'Количество', 'Исполнено', 'Исполнено %', 'Статус', 'Возраст'])
+        self.table.itemSelectionChanged.connect(self._on_order_selected)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(TABLE_ROW_H)
@@ -208,6 +215,8 @@ class MainWindow(QMainWindow):
         manual_f = QFormLayout(manual_box)
         self.side = QComboBox(); self.side.addItems(['BUY', 'SELL'])
         self.price = QLineEdit(); self.qty = QLineEdit(); self.total = self._value('0.00000000')
+        self.price.textChanged.connect(self._recalc_total)
+        self.qty.textChanged.connect(self._recalc_total)
         manual_f.addRow('Сторона', self.side)
         manual_f.addRow('Цена', self.price)
         manual_f.addRow('Количество', self.qty)
@@ -286,6 +295,9 @@ class MainWindow(QMainWindow):
     def _load_filters_if_needed(self):
         if self.filters is None:
             self.filters = self.client.get_exchange_info(self.cfg['symbol'])
+            price_filter = (self.filters or {}).get('PRICE_FILTER', {})
+            tick_size = Decimal(str(price_filter.get('tickSize', 0) or 0))
+            self.market.set_tick_size(tick_size if tick_size > 0 else None)
 
     def _set_private_polling(self, enabled: bool):
         self.polling.set_private_enabled(enabled and self.runtime.account_auth_state == 'CONNECTED')
@@ -297,7 +309,8 @@ class MainWindow(QMainWindow):
     def refresh_balances(self, force: bool = False):
         if self.runtime.account_auth_state != 'CONNECTED':
             return
-        self.task_runner.run_task('balances', self.account.balances)
+        last = Decimal(str(self.m['Последняя'].text() or 0))
+        self.task_runner.run_task('balances', lambda: self.account.balances(last))
 
     def refresh_orders(self, force: bool = False):
         if self.runtime.account_auth_state != 'CONNECTED':
@@ -318,9 +331,10 @@ class MainWindow(QMainWindow):
             self.m['Последняя'].setText(f"{Decimal(str(s.get('last', 0))):.8f}")
             self.m['Bid'].setText(f"{Decimal(str(s.get('bid', 0))):.8f}")
             self.m['Ask'].setText(f"{Decimal(str(s.get('ask', 0))):.8f}")
-            self.m['Спред'].setText(f"{Decimal(str(s.get('spread', 0))):.4f}")
-            self.m['Тики'].setText(str(s.get('spread_ticks', 0)))
+            spread = Decimal(str(s.get('spread', 0)))
+            self._update_spread_panel(spread, s.get('spread_ticks', '-'))
             self.m['Возраст REST'].setText(str(s.get('rest_age', '-')))
+            self._recalc_equity_total()
         elif name == 'balances':
             bal = payload
             self.b['USDT свободно'].setText(f"{Decimal(str(bal.get('USDT_free', 0))):.8f}")
@@ -329,9 +343,13 @@ class MainWindow(QMainWindow):
             self.b['EURI заблокировано'].setText(f"{Decimal(str(bal.get('EURI_locked', 0))):.8f}")
             self.b['Оценка всего USDT'].setText(f"{Decimal(str(bal.get('equity_usdt', 0))):.8f}")
             self.runtime.mark_balances_update()
-            self.logger.log('БАЛАНС', f"USDT={self.b['USDT свободно'].text()} EURI={self.b['EURI свободно'].text()}")
+            now = time.time()
+            if (now - self._last_balance_log_ts) >= 10:
+                self.logger.log('БАЛАНС', f"USDT={self.b['USDT свободно'].text()} EURI={self.b['EURI свободно'].text()}")
+                self._last_balance_log_ts = now
         elif name == 'orders':
             data = payload
+            self._orders_by_id = {int(o.get('orderId')): o for o in data if o.get('orderId') is not None}
             self.table.setRowCount(len(data))
             now_ms = int(time.time() * 1000)
             for r, o in enumerate(data):
@@ -339,10 +357,11 @@ class MainWindow(QMainWindow):
                 orig = Decimal(str(o.get('origQty', 0) or 0))
                 filled = (executed / orig * Decimal('100')) if orig > 0 else Decimal('0')
                 age = format_age_ms(max(0, now_ms - int(o.get('time', now_ms))))
-                vals = [o.get('orderId'), o.get('side'), o.get('price'), o.get('origQty'), o.get('executedQty'), f'{filled:.1f}%', o.get('status'), age]
+                vals = [o.get('orderId'), o.get('side'), f"{Decimal(str(o.get('price', 0) or 0)):.8f}", f"{orig:.8f}", f"{executed:.8f}", f'{filled:.1f}%', o.get('status'), age]
                 for c, v in enumerate(vals):
                     self.table.setItem(r, c, QTableWidgetItem(str(v)))
             self.runtime.mark_orders_update()
+            self._update_order_activity()
         elif name == 'place_order':
             side = str(payload.get('side', ''))
             self.logger.log('ОРДЕР', f'LIMIT {side} отправлен')
@@ -395,7 +414,13 @@ class MainWindow(QMainWindow):
         self.task_runner.run_task('cancel_order', self.orders.cancel_all)
 
     def run_diagnostics(self):
-        self.logger.log('ИНФО', f'diag in_flight={len(self.task_runner.in_flight)} polling={self.polling.running} private={self.polling.private_enabled}')
+        self.logger.log('ИНФО', 'Public REST: OK')
+        self.logger.log('AUTH', f"Account: {self.runtime.account_auth_state}")
+        self.logger.log('БАЛАНС', f"USDT={self.b['USDT свободно'].text()} EURI={self.b['EURI свободно'].text()}")
+        self.logger.log('ИНФО', f'Open orders: {self.table.rowCount()}')
+        self.logger.log('ИНФО', f"Trading: {'ON' if self.cfg.get('trading_enabled', False) else 'OFF'}")
+        self.logger.log('ИНФО', f"TaskRunner: in_flight={len(self.task_runner.in_flight)}")
+        self.logger.log('ИНФО', 'Диагностика завершена')
 
     def _tick_status(self):
         self.s['Публичный REST'].setText('OK')
@@ -406,6 +431,82 @@ class MainWindow(QMainWindow):
         self.s['Только чтение'].setText('ON' if self.cfg.get('read_only', True) else 'OFF')
         self.s['WS'].setText('ON' if self.ws.enabled else 'OFF')
         self.s['Задержка'].setText(self.runtime.last_public_latency_ms or '0ms')
+        self._refresh_order_ages()
+        self._update_order_activity()
+        self._update_runtime_fsm()
+        self._update_trade_buttons()
+
+    def _recalc_total(self):
+        try:
+            total = Decimal(self.price.text().strip()) * Decimal(self.qty.text().strip())
+        except Exception:
+            total = Decimal('0')
+        self.total.setText(f'{total:.8f}')
+
+    def _recalc_equity_total(self):
+        usdt = Decimal(self.b['USDT свободно'].text()) + Decimal(self.b['USDT заблокировано'].text())
+        euri = Decimal(self.b['EURI свободно'].text()) + Decimal(self.b['EURI заблокировано'].text())
+        self.b['Оценка всего USDT'].setText(f"{(usdt + euri * Decimal(self.m['Последняя'].text())):.8f}")
+
+    def _update_spread_panel(self, spread: Decimal, ticks):
+        if spread > 0 and spread != self._spread_value:
+            self._spread_since = time.time()
+        self._spread_value = spread
+        lifetime = int((time.time() - self._spread_since) * 1000) if self._spread_since else 0
+        self.m['Спред'].setText(f'{spread:.8f}')
+        self.m['Тики'].setText(str(ticks))
+        self.m['Lifetime'].setText(f'{lifetime} ms')
+        self.m['Stable'].setText('СТАБИЛЕН' if lifetime >= 3000 else 'НЕСТАБИЛЕН')
+
+    def _on_order_selected(self):
+        row = self.table.currentRow()
+        if row >= 0 and self.table.item(row, 0):
+            self._selected_order_id = int(self.table.item(row, 0).text())
+
+    def _update_order_activity(self):
+        order = self._orders_by_id.get(self._selected_order_id) if self._selected_order_id else None
+        if not order and self._orders_by_id:
+            order = max(self._orders_by_id.values(), key=lambda x: int(x.get('time', 0) or 0))
+        self.s['Активный ордер'].setText(str(order.get('orderId')) if order else '-')
+        if order:
+            self.s['Время жизни'].setText(format_age_ms(max(0, int(time.time() * 1000) - int(order.get('time', 0) or 0))))
+        else:
+            self.s['Время жизни'].setText('-')
+        self.s['Очередь'].setText('-')
+        self.s['Reprice count'].setText('0')
+
+    def _refresh_order_ages(self):
+        now_ms = int(time.time() * 1000)
+        for r in range(self.table.rowCount()):
+            oid_item = self.table.item(r, 0)
+            if not oid_item:
+                continue
+            order = self._orders_by_id.get(int(oid_item.text()))
+            if order:
+                self.table.setItem(r, 7, QTableWidgetItem(format_age_ms(max(0, now_ms - int(order.get('time', now_ms))))))
+
+    def _update_runtime_fsm(self):
+        if self.runtime.account_auth_state != 'CONNECTED':
+            self.s['State'].setText('DISCONNECTED')
+        elif self.cfg.get('read_only', True) or not self.cfg.get('trading_enabled', False):
+            self.s['State'].setText('MANUAL_BLOCKED')
+        else:
+            self.s['State'].setText('MANUAL_READY')
+
+    def _update_trade_buttons(self):
+        reason = None
+        if self.runtime.account_auth_state != 'CONNECTED':
+            reason = 'аккаунт не подключён'
+        elif self.cfg.get('read_only', True):
+            reason = 'включён режим только чтение'
+        elif not self.cfg.get('trading_enabled', False):
+            reason = 'торговля выключена в настройках'
+        elif self.filters is None:
+            reason = 'фильтры Binance не загружены'
+        enabled = reason is None
+        for btn in (self.buy_btn, self.sell_btn):
+            btn.setEnabled(enabled)
+            btn.setToolTip('' if enabled else reason)
 
     def start_polling(self):
         if self.polling.start():
