@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFormLayout, QGridLayout
                                QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView)
 
 from app.core.account_service import AccountService
-from app.core.binance_client import BinanceClient
+from app.core.binance_client import BinanceClient, normalize_binance_error
 from app.core.config import load_config, save_config
 from app.core.filters import validate_order
 from app.core.logger import AppLogger
@@ -29,7 +29,7 @@ from app.gui.panels.log_panel import LogPanel
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('EUT v0.2.1 — GUI Polish + Settings')
+        self.setWindowTitle('EUT v0.2.2 — Connection Fix + Cockpit Layout Final Polish')
         self.resize(1500, 900)
         self.logger = AppLogger(max_records=500)
         self.cfg = load_config()
@@ -59,10 +59,11 @@ class MainWindow(QMainWindow):
         main.addWidget(self._top_bar())
         splitter_v = QSplitter(Qt.Vertical)
         splitter_h = QSplitter(Qt.Horizontal)
-        left = QWidget(); lv = QVBoxLayout(left); lv.addWidget(self._market_panel()); lv.addWidget(self._spread_panel()); lv.addWidget(self._balance_panel()); lv.addStretch(1)
-        center = QWidget(); cv = QVBoxLayout(center); cv.addWidget(self._manual_panel()); cv.addWidget(self._order_activity_panel()); cv.addStretch(1)
-        splitter_h.addWidget(left); splitter_h.addWidget(self._orders_panel()); splitter_h.addWidget(center)
-        splitter_h.setStretchFactor(0, 2); splitter_h.setStretchFactor(1, 4); splitter_h.setStretchFactor(2, 2)
+        left = QWidget(); left.setFixedWidth(380); lv = QVBoxLayout(left); lv.addWidget(self._market_panel()); lv.addWidget(self._spread_panel()); lv.addWidget(self._balance_panel()); lv.addStretch(1)
+        center = QWidget(); cv = QVBoxLayout(center); cv.addWidget(self._orders_panel())
+        right = QWidget(); right.setFixedWidth(330); rv = QVBoxLayout(right); rv.addWidget(self._manual_panel()); rv.addWidget(self._order_activity_panel()); rv.addWidget(self._fsm_panel()); rv.addStretch(1)
+        splitter_h.addWidget(left); splitter_h.addWidget(center); splitter_h.addWidget(right)
+        splitter_h.setStretchFactor(0, 0); splitter_h.setStretchFactor(1, 1); splitter_h.setStretchFactor(2, 0)
         splitter_v.addWidget(splitter_h)
         splitter_v.addWidget(self._log_panel())
         splitter_v.setStretchFactor(0, 4); splitter_v.setStretchFactor(1, 2)
@@ -123,11 +124,13 @@ class MainWindow(QMainWindow):
     def _orders_panel(self):
         g=QGroupBox('Open Orders'); v=QVBoxLayout(g); self.table=QTableWidget(0,8)
         self.table.setHorizontalHeaderLabels(['Order ID','Side','Price','Qty','Filled','Filled %','Status','Age'])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for idx,w in enumerate([160,70,100,100,100,90,110,80]):
+            if idx>0: self.table.setColumnWidth(idx,w)
         self.table.verticalHeader().setDefaultSectionSize(22)
         self.table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setMinimumHeight(360)
+        self.table.setMinimumHeight(300)
         v.addWidget(self.table)
         bar = QHBoxLayout()
         for t, fn in [('Refresh', self.refresh_orders), ('Cancel Selected', self.cancel_selected), ('Cancel All', self.cancel_all)]:
@@ -137,6 +140,7 @@ class MainWindow(QMainWindow):
 
     def _log_panel(self):
         g=QGroupBox('Logs'); v=QVBoxLayout(g); self.log_panel=LogPanel(500); v.addWidget(self.log_panel)
+        clear_btn = QPushButton('Clear Logs'); clear_btn.clicked.connect(self.log_panel.clear); v.addWidget(clear_btn)
         self.logger.subscribe(self.log_panel.append_record)
         return g
 
@@ -159,8 +163,9 @@ class MainWindow(QMainWindow):
             return True, 'Connection OK'
         except Exception as e:
             self.runtime.mark_connection(False)
-            self.logger.log('ERROR', f'connection failed: {e}')
-            return False, 'Connection failed'
+            msg = normalize_binance_error(e)
+            self.logger.log('ERROR', msg)
+            return False, msg
 
     def refresh_market(self):
         try:
@@ -183,9 +188,10 @@ class MainWindow(QMainWindow):
     def refresh_balances(self):
         try:
             b=self.account.balances(); self.runtime.mark_balances_update()
-            self.b['USDT Free'].setText(f"{b['USDT_free']:.4f}"); self.b['USDT Locked'].setText(f"{b['USDT_locked']:.4f}")
-            self.b['EURI Free'].setText(f"{b['EURI_free']:.4f}"); self.b['EURI Locked'].setText(f"{b['EURI_locked']:.4f}")
-            est = b['USDT_free'] + b['USDT_locked']
+            self.b['USDT Free'].setText(f"{b['USDT_free']:.8f}"); self.b['USDT Locked'].setText(f"{b['USDT_locked']:.8f}")
+            self.b['EURI Free'].setText(f"{b['EURI_free']:.8f}"); self.b['EURI Locked'].setText(f"{b['EURI_locked']:.8f}")
+            last_price = self.market.snapshot().get('last', 0)
+            est = b['USDT_free'] + b['USDT_locked'] + ((b['EURI_free'] + b['EURI_locked']) * float(last_price or 0))
             self.b['Estimated Total USDT'].setText(f"{est:.4f}")
             self.logger.log('BALANCE', f"USDT={est:.2f} EURI={b['EURI_free']+b['EURI_locked']:.2f}")
         except Exception as e: self.logger.log('ERROR',f'balances: {e}')
@@ -212,6 +218,12 @@ class MainWindow(QMainWindow):
         self.oa['Queue age'].setText(f"{self.order_manager.alive_time_ms()} ms")
         self.oa['Reprices count'].setText(str(self.order_manager.reprices_count))
 
+
+    def _fsm_panel(self):
+        g=QGroupBox('Runtime FSM'); f=QFormLayout(g)
+        self.fsm_value = QLabel('-')
+        f.addRow('State', self.fsm_value)
+        return g
     def place(self, side):
         if not self.cfg.get('trading_enabled') or self.cfg.get('read_only', True): self.logger.log('ERROR','Trading disabled/read-only mode'); return
         ok,msg = validate_order(self.price.text(), self.qty.text(), tick_size='0.0001', step_size='0.1', min_qty='0.1', min_notional='5')
