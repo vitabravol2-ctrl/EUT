@@ -204,3 +204,25 @@ def test_watch_state_does_not_block_if_spread_ticks_meet_min(qapp):
     ok, reason = w._risk_ok()
     assert ok is True
     assert reason == 'ok'
+
+
+def test_main_window_uses_exchange_filters_not_symbol_filters():
+    assert '_symbol_filters' not in MainWindow._run_live_cycle.__code__.co_names
+
+
+def test_sell_compute_succeeds_with_exchange_filters(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '3'
+    w._cycle.buy_filled_qty = Decimal('3')
+    w._cycle.sell_filled_qty = Decimal('0')
+    w._run_live_cycle()
+    assert any(side == 'SELL' for side, _, _ in w.orders.placed)
+
+
+def test_missing_filters_does_not_crash_runtime(qapp):
+    w = _ready_window()
+    w._exchange_filters = {}
+    w._load_exchange_filters = lambda: False
+    w._balances['EURI_free'] = '5'
+    w._run_live_cycle()
+    assert w._live_running is True
