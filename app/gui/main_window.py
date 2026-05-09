@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QForm
 
 from app.core.account_service import AccountService
 from app.core.async_runner import TaskRunner
-from app.core.binance_client import BinanceAPIError
+from app.core.binance_client import BinanceAPIError, BinanceClient
 from app.core.config import load_config, save_config
 from app.core.execution_metrics import QueueQualityEstimator, SpreadStabilityAnalyzer
 from app.core.filters import validate_order_from_exchange_info
