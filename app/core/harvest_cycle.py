@@ -86,3 +86,19 @@ class HarvestCycle:
         self.closed_qty += qty
         self.realized_pnl += (fill_price - self.buy_avg_price) * qty
         self.updated_at = _now()
+
+    def next_state_after_buy_cancel(self) -> CycleState:
+        return CycleState.WAIT_READY if self.buy_filled_qty <= 0 else CycleState.PLACE_SELL
+
+    def can_place_sell(self) -> bool:
+        return self.open_position_qty > 0
+
+    def reset_cycle_accounting(self) -> None:
+        self.buy_order_id = None
+        self.sell_order_id = None
+        self.buy_requested_qty = Decimal('0')
+        self.target_qty = Decimal('0')
+        self.open_position_qty = Decimal('0')
+        self.closed_qty = self.buy_filled_qty
+        self.sell_filled_qty = self.buy_filled_qty
+        self.updated_at = _now()
