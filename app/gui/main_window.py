@@ -86,7 +86,7 @@ class MainWindow(QMainWindow):
         self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
         self._cycle=HarvestCycle()
         self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
-        self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0
+        self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,3000,3000,self)
@@ -202,17 +202,13 @@ class MainWindow(QMainWindow):
         return True, 'ok'
 
     def start_harvest(self):
-        self.logger.log('INFO', '[LIVE] start requested')
         if self._cycle.state == CycleState.ERROR:
             self._cycle = HarvestCycle()
             old, new = self._cycle.transition(CycleState.WAIT_READY, 'start reset from error')
             self._live_running = True
             self.logger.log('FSM', f'{CycleState.ERROR.value} -> {CycleState.RESET.value} reason=start reset')
+            self.logger.log('INFO', '[LIVE] runtime started')
             self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
-            return
-        ok, reason = self._risk_ok()
-        if not ok:
-            self.logger.log('RISK', f'[RISK] blocked: {reason}')
             return
         if not self._live_confirmed:
             answer = QMessageBox.question(self, 'LIVE Confirmation', 'Start LIVE harvest with real Binance orders?\nSmall test mode only.')
@@ -221,6 +217,7 @@ class MainWindow(QMainWindow):
             self._live_confirmed = True
         self._live_running = True
         old, new = self._cycle.transition(CycleState.WAIT_READY, 'start requested')
+        self.logger.log('INFO', '[LIVE] runtime started')
         self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
 
     def stop_harvest(self):
@@ -255,7 +252,14 @@ class MainWindow(QMainWindow):
             bid = Decimal(str(self._last_market_snapshot.get('bid', '0')))
             ask = Decimal(str(self._last_market_snapshot.get('ask', '0')))
             if c.state == CycleState.WAIT_READY and self._live_running:
-                old, new = c.transition(CycleState.PLACE_BUY, 'ready'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=ready')
+                ok, reason = self._risk_ok()
+                if ok:
+                    old, new = c.transition(CycleState.PLACE_BUY, 'ready'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=ready')
+                else:
+                    now = __import__('time').time()
+                    if now - self._last_wait_log_at >= 7:
+                        self.logger.log('INFO', f'[LIVE] waiting: {reason}')
+                        self._last_wait_log_at = now
             if c.state == CycleState.PLACE_BUY:
                 quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
                 raw_qty = quote / bid if bid > 0 else Decimal('0')
@@ -272,8 +276,9 @@ class MainWindow(QMainWindow):
                 notional = qty_n * price
                 self.logger.log('INFO', f'[BUY] raw_qty={raw_qty}')
                 self.logger.log('INFO', f'[BUY] normalized_qty={qty_n}')
-                self.logger.log('INFO', f"[BUY] stepSize={info.get('stepSize', '0.01')}")
-                self.logger.log('INFO', f"[BUY] tickSize={info.get('tickSize', '0.0001')}")
+                self.logger.log('INFO', f"[BUY] filters raw LOT_SIZE={info.get('LOT_SIZE')}")
+                self.logger.log('INFO', f"[BUY] filters raw MARKET_LOT_SIZE={info.get('MARKET_LOT_SIZE')}")
+                self.logger.log('INFO', f"[BUY] filters raw PRICE_FILTER={info.get('PRICE_FILTER')}")
                 self.logger.log('INFO', f'[BUY] notional={notional}')
                 if qty_n <= 0 or qty_n < Decimal(str(info.get('minQty', '0'))):
                     self.logger.log('RISK', '[RISK] blocked: qty below minQty after step rounding')
@@ -295,8 +300,10 @@ class MainWindow(QMainWindow):
                     self.logger.log('ERROR', '[BUY] rejected reason=qty not aligned to stepSize')
                     c.transition(CycleState.ERROR, 'qty not aligned to stepSize')
                     return
-                self.logger.log('INFO', f'[BUY] placing maker price={api_price} qty={api_qty}')
-                resp = self.orders.place_limit_maker('BUY', api_qty, api_price)
+                self.logger.log('INFO', f"[BUY] final payload quantity='{api_qty}'")
+                self.logger.log('INFO', f"[BUY] final payload price='{api_price}'")
+                self.logger.log('INFO', '[BUY] final payload type=LIMIT_MAKER')
+                resp = self.orders.place_limit_maker('BUY', str(api_qty), str(api_price))
                 c.buy_order_id = int(resp.get('orderId')); c.buy_requested_qty = qty_n; c.target_qty = qty_n; self._buy_started_at = __import__('time').time()
                 old,new=c.transition(CycleState.BUY_WORKING, 'buy accepted'); self.logger.log('INFO', f"[BUY] accepted id={c.buy_order_id}"); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy accepted')
             if c.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and c.buy_order_id:
@@ -328,6 +335,8 @@ class MainWindow(QMainWindow):
                 old,new=c.transition(CycleState.IDLE,'cycle done'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done'); self._live_running=False
         except Exception as e:
             self.logger.log('ERROR', f'[LIVE] runtime error: {e}')
+            if hasattr(e, 'code') or hasattr(e, 'message'):
+                self.logger.log('ERROR', f\"[BUY] Binance reject code={getattr(e, 'code', 'n/a')} message={getattr(e, 'message', str(e))}\")
             old,new=c.transition(CycleState.ERROR, str(e)); self.logger.log('FSM', f'{old.value} -> {new.value} reason={str(e)}')
     def _tick_status(self):
         self._status_badges['SYSTEM'].setText('SYSTEM OK'); self._status_badges['TRADING'].setText(f"TRADING {'ON' if self.cfg.get('trading_enabled',False) else 'OFF'}")
