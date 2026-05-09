@@ -302,10 +302,11 @@ class MainWindow(QMainWindow):
             ask = Decimal(str(self._last_market_snapshot.get('ask', '0')))
             if bid <= 0 or ask <= 0 or ask <= bid:
                 return
-            if not self._require_exchange_filters():
+            filters = self.get_symbol_filters()
+            if not filters:
                 return
-            tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001')))
-            step = Decimal(str(self._exchange_filters.get('stepSize', '0.0001')))
+            tick = Decimal(str(filters.get('tickSize', '0.0001')))
+            step = Decimal(str(filters.get('stepSize', '0.0001')))
             min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
             spread_ticks = (ask - bid) / tick if tick > 0 else Decimal('0')
             if spread_ticks < min_spread_ticks:
@@ -468,7 +469,7 @@ class MainWindow(QMainWindow):
                         self._pending_sell_grace_until = 0.0
                 if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
                     sell_qty = floor_to_step(min(exchange_free_euri, target_sell_qty), step)
-                    min_qty = Decimal(str(self._symbol_filters.get('minQty', '0') or '0'))
+                    min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
                     if sell_qty < min_qty:
                         self.logger.log('INFO', '[SELL] skipped: no free inventory after refresh')
                     elif sell_qty > 0:
@@ -585,12 +586,21 @@ class MainWindow(QMainWindow):
             self.logger.log('RISK', '[RISK] blocked: exchange filters missing')
             return False
     def _require_exchange_filters(self): return bool(self._exchange_filters) or self._load_exchange_filters()
+    def get_symbol_filters(self):
+        if not self._require_exchange_filters():
+            self.logger.log('RISK', '[RISK] blocked: exchange filters missing')
+            return None
+        required = ('tickSize', 'stepSize', 'minQty', 'maxQty', 'minNotional')
+        filters = {k: self._exchange_filters.get(k) for k in required}
+        if any(filters.get(k) in (None, '', '0', 'None', 'none', 'null') for k in required):
+            self.logger.log('RISK', '[RISK] blocked: exchange filters missing')
+            return None
+        return filters
     def place(self, side, price, qty):
         if not self._private_ok and not self.cfg.get('api_key'): self.logger.log('ERROR','[ORDER] rejected reason=private api unavailable'); return
         try:
-            if not self._require_exchange_filters():
-                self.logger.log('RISK', '[RISK] blocked: exchange filters missing'); return
-            info = self._exchange_filters
+            info = self.get_symbol_filters()
+            if not info: return
             tick = Decimal(str(info.get('tickSize')))
             step = Decimal(str(info.get('stepSize')))
             api_price = format_decimal_for_tick(Decimal(str(price)), tick)
