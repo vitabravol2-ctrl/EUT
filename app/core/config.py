@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     'max_active_cycle': 1,
     'allow_partial_fills': True,
     'min_partial_fill_euri': 0.0,
+    'min_resize_delta_euri': 1.0,
     'reprice_on_move': True,
     'cancel_on_spread_collapse': True,
     'stop_after_n_failed_cycles': 3,
