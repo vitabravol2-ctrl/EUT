@@ -8,6 +8,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView
 
 from app.core.account_service import AccountService
+from app.core.fill_observer import FillObserver, MarketActivity
 from app.core.async_runner import TaskRunner
 from app.core.binance_client import BinanceAPIError, BinanceClient
 from app.core.config import load_config, save_config
@@ -80,6 +81,8 @@ class MainWindow(QMainWindow):
         self._spread_analyzer=SpreadStabilityAnalyzer(); self._queue_estimator=QueueQualityEstimator(); self._harvest_engine=HarvestReadinessEngine(); self._private_ok=False
         self._spread_engine=SpreadStabilityEngine(Decimal('0.0001'), int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('stable_ms',3000)))
         self._spread_metrics=None; self._last_spread_readiness=None
+        self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('stable_ms',3000)))
+        self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,3000,3000,self)
@@ -99,6 +102,8 @@ class MainWindow(QMainWindow):
         spread_box=QGroupBox('Spread Stability'); sl=QFormLayout(spread_box)
         self.ss_ticks=QLabel('-'); self.ss_lifetime=QLabel('-'); self.ss_bid=QLabel('-'); self.ss_ask=QLabel('-'); self.ss_ratio=QLabel('-'); self.ss_collapse=QLabel('0'); self.ss_readiness=QLabel('NOT_READY')
         for n,w in [('Spread ticks',self.ss_ticks),('Spread lifetime',self.ss_lifetime),('Bid stable',self.ss_bid),('Ask stable',self.ss_ask),('Stable ratio',self.ss_ratio),('Collapse count',self.ss_collapse),('Readiness',self.ss_readiness)]: sl.addRow(n,w)
+        self.fo_bid=QLabel('-'); self.fo_ask=QLabel('-'); self.fo_window=QLabel('-'); self.fo_activity=QLabel('-'); self.fo_possible=QLabel('NO')
+        for n,w in [('Fill: bid lifetime',self.fo_bid),('Fill: ask lifetime',self.fo_ask),('Fill: window',self.fo_window),('Fill: market activity',self.fo_activity),('Fill: possible',self.fo_possible)]: sl.addRow(n,w)
         right=QGroupBox('Actions'); rl=QVBoxLayout(right)
         for t,f in [('Manual Order',self.open_manual_order),('Cancel Selected',self.cancel_selected),('Cancel All',self.cancel_all),('All Data',self.open_all_data),('Settings',self.open_settings)]: rl.addWidget(self._btn(t,f))
         self.cancel_selected_btn=right.findChildren(QPushButton)[1]; self.cancel_all_btn=right.findChildren(QPushButton)[2]
@@ -111,7 +116,7 @@ class MainWindow(QMainWindow):
     def open_manual_order(self): self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
     def open_all_data(self): self.all_data_dialog=AllDataDialog(self,self); self.all_data_dialog.show()
     def apply_settings(self,v): self.cfg.update(v); save_config(self.cfg)
-    def apply_trade_settings(self,v): self.cfg.update(v); save_config(self.cfg); self._sync_trade_settings_labels()
+    def apply_trade_settings(self,v): self.cfg.update(v); save_config(self.cfg); self._sync_trade_settings_labels(); self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('stable_ms',3000)))
     def test_connection(self,v): return True,'ok'
     def refresh_market(self,force=False): self.task_runner.run_task('market', lambda: self.market.snapshot())
     def refresh_balances(self,force=False): self.task_runner.run_task('balances', lambda: self.account.balances(Decimal(str(self._last_market_snapshot.get('last',0) or 0))))
@@ -128,6 +133,24 @@ class MainWindow(QMainWindow):
             self.ss_ratio.setText(f"{metrics.state.stable_spread_ratio*100:.0f}%")
             self.ss_collapse.setText(str(metrics.state.spread_collapse_count))
             self.ss_readiness.setText(metrics.state.readiness.value)
+            self._fill_observation=self._fill_observer.observe(
+                Decimal(str(payload.get('bid',0))),
+                Decimal(str(payload.get('ask',0))),
+                metrics.snapshot.spread_ticks,
+                metrics.state.spread_lifetime_ms,
+            )
+            self.fo_bid.setText(f"{self._fill_observation.bid_lifetime_ms}ms")
+            self.fo_ask.setText(f"{self._fill_observation.ask_lifetime_ms}ms")
+            self.fo_window.setText(f"{self._fill_observation.fill_window_estimate_ms}ms")
+            self.fo_activity.setText(self._fill_observation.market_activity.value)
+            self.fo_possible.setText('YES' if self._fill_observation.fill_possible else 'NO')
+            slow_market = self._fill_observation.market_activity == MarketActivity.LOW
+            if self._fill_observation.fill_possible != self._last_fill_possible:
+                self.logger.log('INFO', '[FILL] POSSIBLE' if self._fill_observation.fill_possible else '[FILL] NOT_POSSIBLE')
+                self._last_fill_possible = self._fill_observation.fill_possible
+            if slow_market != self._last_slow_market:
+                self.logger.log('INFO', f"[FILL] slow_market={'YES' if slow_market else 'NO'}")
+                self._last_slow_market = slow_market
             if metrics.state.readiness != self._last_spread_readiness:
                 self.logger.log('INFO', f"[SPREAD] {metrics.state.readiness.value} spread={metrics.snapshot.spread_ticks:.2f} lifetime={metrics.state.spread_lifetime_ms}ms")
                 self._last_spread_readiness=metrics.state.readiness
