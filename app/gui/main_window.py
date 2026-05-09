@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from decimal import Decimal
+import time
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
@@ -86,10 +87,10 @@ class MainWindow(QMainWindow):
         self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
         self._cycle=HarvestCycle()
         self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
-        self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0
+        self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0; self._cycle_started_at=time.time(); self._last_fill_time='-'
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
-        self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,3000,3000,self)
+        self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
         self._status_timer=QTimer(self); self._status_timer.timeout.connect(self._tick_status); self._status_timer.start(300); QTimer.singleShot(50,self._startup_connect_flow)
     def _init_services(self):
         self.client=BinanceClient(self.cfg['api_key'],self.cfg['api_secret'],self.cfg['testnet'],self.cfg.get('request_timeout_sec',3)); self.market=MarketService(self.client,self.cfg['symbol']); self.account=AccountService(self.client); self.orders=OrderService(self.client,self.cfg['symbol'])
@@ -102,9 +103,9 @@ class MainWindow(QMainWindow):
         left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_quote=QLabel(); self.ts_max_pos=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_entry_ttl=QLabel(); self.ts_exit_ttl=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
         for n,w in [('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Order quote USDT',self.ts_quote),('Max position EURI',self.ts_max_pos),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Entry order TTL sec',self.ts_entry_ttl),('Exit order TTL sec',self.ts_exit_ttl),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Max cycle age sec',self.ts_cycle_age),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         fl.addRow(self._btn('START HARVEST', self.start_harvest)); fl.addRow(self._btn('STOP HARVEST', self.stop_harvest)); fl.addRow(self._btn('Edit Settings', self.open_trade_settings))
-        cycle=QGroupBox('Cycle State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel()
-        for n,w in [('State',self.cs_state),('Target qty',self.cs_target),('Bought',self.cs_bought),('Sold',self.cs_sold),('Open position',self.cs_open),('Avg buy',self.cs_avg_buy),('Avg sell',self.cs_avg_sell),('Realized PnL',self.cs_pnl),('Active order',self.cs_order),('Reason',self.cs_reason)]: cf.addRow(n,w)
-        center=QGroupBox('Open Orders'); cl=QVBoxLayout(center); self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(['ID','Side','Price','Qty','Filled','%','Status','Age']); self.table.itemSelectionChanged.connect(self._on_order_selected); self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive); cl.addWidget(self.table); self.no_orders=QLabel('No open orders'); cl.addWidget(self.no_orders)
+        cycle=QGroupBox('Cycle State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-')
+        for n,w in [('State',self.cs_state),('Target qty',self.cs_target),('Bought',self.cs_bought),('Sold',self.cs_sold),('Open position',self.cs_open),('Avg buy',self.cs_avg_buy),('Avg sell',self.cs_avg_sell),('Realized PnL',self.cs_pnl),('Working BUY price',self.cs_buy_working),('Working SELL price',self.cs_sell_working),('Remaining BUY qty',self.cs_buy_remaining),('Remaining SELL qty',self.cs_sell_remaining),('Cycle age',self.cs_cycle_age),('Last fill time',self.cs_last_fill),('Active order',self.cs_order),('Reason',self.cs_reason)]: cf.addRow(n,w)
+        center=QGroupBox('Open Orders'); cl=QVBoxLayout(center); self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(['orderId','side','price','origQty','executedQty','remainingQty','status','age ms']); self.table.itemSelectionChanged.connect(self._on_order_selected); self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive); cl.addWidget(self.table); self.no_orders=QLabel('No open orders'); cl.addWidget(self.no_orders)
         spread_box=QGroupBox('Spread Stability'); sl=QFormLayout(spread_box)
         self.ss_ticks=QLabel('-'); self.ss_lifetime=QLabel('-'); self.ss_bid=QLabel('-'); self.ss_ask=QLabel('-'); self.ss_ratio=QLabel('-'); self.ss_collapse=QLabel('0'); self.ss_readiness=QLabel('NOT_READY')
         for n,w in [('Spread ticks',self.ss_ticks),('Spread lifetime',self.ss_lifetime),('Bid stable',self.ss_bid),('Ask stable',self.ss_ask),('Stable ratio',self.ss_ratio),('Collapse count',self.ss_collapse),('Readiness',self.ss_readiness)]: sl.addRow(n,w)
@@ -167,14 +168,21 @@ class MainWindow(QMainWindow):
             if metrics.state.spread_collapse_count > 0 and metrics.state.readiness == ReadinessState.NOT_READY:
                 self.logger.log('INFO', '[SPREAD] COLLAPSE')
         elif name=='balances': self._balances=payload; self._private_ok=True
-        elif name=='orders': self._last_open_orders=payload; self._private_ok=True; self._render_orders(payload); self.logger.log('INFO', f"[ORDERS] refreshed count={len(payload)}")
+        elif name=='orders': self._sync_open_orders(payload)
     def _on_task_error(self,name,err):
         self.logger.log('ERROR', f'{name}: {err}');
         if name in ('orders','balances'): self._private_ok=False
+    def _sync_open_orders(self, payload):
+        self._last_open_orders = payload; self._private_ok = True; self._render_orders(payload); self.logger.log('INFO', f"[ORDERS] sync count={len(payload)}")
+        for o in payload:
+            self.logger.log('INFO', f"[ORDERS] {o.get('side')} working price={o.get('price')} qty={o.get('origQty')} filled={o.get('executedQty')}")
+
     def _render_orders(self,payload):
         self._orders_by_id={int(o.get('orderId')):o for o in payload if o.get('orderId')}; self.table.setRowCount(len(payload)); self.no_orders.setVisible(len(payload)==0)
         for r,o in enumerate(payload):
-            vals=[o.get('orderId'),o.get('side'),o.get('price'),o.get('origQty'),o.get('executedQty'),'0%',o.get('status'),'-']
+            orig = Decimal(str(o.get('origQty', '0') or '0')); exe = Decimal(str(o.get('executedQty', '0') or '0')); rem = max(Decimal('0'), orig-exe)
+            ts = int(o.get('updateTime') or o.get('time') or 0); age_ms = str(max(0, int(time.time() * 1000) - ts)) if ts > 0 else '-'
+            vals=[o.get('orderId'),o.get('side'),o.get('price'),o.get('origQty'),o.get('executedQty'),str(rem),o.get('status'),age_ms]
             for c,v in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(v)))
 
     def _risk_ok(self) -> tuple[bool, str]:
@@ -216,6 +224,7 @@ class MainWindow(QMainWindow):
                 return
             self._live_confirmed = True
         self._live_running = True
+        self._cycle_started_at = time.time()
         old, new = self._cycle.transition(CycleState.WAIT_READY, 'start requested')
         self.logger.log('INFO', '[LIVE] runtime started')
         self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
@@ -305,18 +314,30 @@ class MainWindow(QMainWindow):
                 self.logger.log('INFO', f"[BUY] final payload quantity='{api_qty}'")
                 self.logger.log('INFO', f"[BUY] final payload price='{api_price}'")
                 self.logger.log('INFO', '[BUY] final payload type=LIMIT_MAKER')
-                resp = self.orders.place_limit_maker('BUY', str(api_qty), str(api_price))
+                resp = self.orders.place_limit_maker('BUY', str(api_qty), str(api_price)); self.refresh_orders(True)
                 c.buy_order_id = int(resp.get('orderId')); c.buy_requested_qty = qty_n; c.target_qty = qty_n; self._buy_started_at = __import__('time').time()
                 old,new=c.transition(CycleState.BUY_WORKING, 'buy accepted'); self.logger.log('INFO', f"[BUY] accepted id={c.buy_order_id}"); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy accepted')
             if c.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and c.buy_order_id:
                 st=self.orders.order_status(c.buy_order_id); status=st.get('status'); exec_qty=Decimal(str(st.get('executedQty','0'))); px=Decimal(str(st.get('price') or bid or '0'))
                 delta=exec_qty-c.buy_filled_qty
-                if delta>0: c.apply_buy_fill(delta, px); self.logger.log('INFO', f'[BUY] partial filled={c.buy_filled_qty}')
+                if delta>0: c.apply_buy_fill(delta, px); self._last_fill_time=time.strftime('%H:%M:%S', time.gmtime()); self.logger.log('INFO', f'[BUY] partial filled={c.buy_filled_qty}'); self.refresh_orders(True); old,new=c.transition(CycleState.PLACE_SELL,'buy partial'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy partial')
+                working_buy_price = Decimal(str(st.get('price') or c.buy_avg_price or '0'))
+                spread_ready = self._spread_metrics and self._spread_metrics.state.readiness == ReadinessState.READY
+                if status in ('NEW', 'PARTIALLY_FILLED'):
+                    if self.cfg.get('cancel_on_spread_collapse', True) and not spread_ready and c.buy_filled_qty <= 0:
+                        self.orders.cancel(c.buy_order_id); self.refresh_orders(True); self.logger.log('INFO','[BUY] cancelled spread collapse')
+                        old,new=c.transition(CycleState.WAIT_READY,'spread collapse'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=spread collapse')
+                        return
+                    if self.cfg.get('reprice_on_move', True) and bid > working_buy_price and spread_ready:
+                        self.logger.log('INFO','[REPRICE] outbid detected'); self.logger.log('INFO','[BUY] cancel requested')
+                        self.orders.cancel(c.buy_order_id); self.refresh_orders(True); self.logger.log('INFO','[BUY] canceled')
+                        old,new=c.transition(CycleState.PLACE_BUY,'reprice'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=reprice')
+                        return
                 ttl=int(self.cfg.get('entry_order_ttl_sec',30))
                 now=__import__('time').time()
                 if status=='FILLED': old,new=c.transition(CycleState.BUY_FILLED,'buy filled'); self.logger.log('INFO','[BUY] filled'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy filled')
                 elif now-self._buy_started_at>ttl:
-                    self.orders.cancel(c.buy_order_id); self.logger.log('INFO','[BUY] cancelled ttl')
+                    self.orders.cancel(c.buy_order_id); self.refresh_orders(True); self.logger.log('INFO','[BUY] cancelled ttl')
                     old,new=c.transition(CycleState.WAIT_READY if c.buy_filled_qty==0 else CycleState.PLACE_SELL,'buy ttl'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy ttl')
             if c.state == CycleState.BUY_FILLED: c.transition(CycleState.PLACE_SELL, 'sell next')
             if c.state == CycleState.PLACE_SELL:
@@ -324,17 +345,24 @@ class MainWindow(QMainWindow):
                 if sell_qty <= 0: c.transition(CycleState.ERROR, 'sell qty invalid'); return
                 price = ask
                 self.logger.log('INFO', f'[SELL] placing maker price={price} qty={sell_qty}')
-                resp = self.orders.place_limit_maker('SELL', str(sell_qty), str(price))
+                resp = self.orders.place_limit_maker('SELL', str(sell_qty), str(price)); self.refresh_orders(True)
                 c.sell_order_id = int(resp.get('orderId')); c.sell_requested_qty = sell_qty; self._sell_started_at = __import__('time').time()
                 old,new=c.transition(CycleState.SELL_WORKING,'sell accepted'); self.logger.log('INFO', f'[SELL] accepted id={c.sell_order_id}'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell accepted')
             if c.state in (CycleState.SELL_WORKING, CycleState.SELL_PARTIAL, CycleState.EXIT_PENDING) and c.sell_order_id:
                 st=self.orders.order_status(c.sell_order_id); status=st.get('status'); exec_qty=Decimal(str(st.get('executedQty','0'))); px=Decimal(str(st.get('price') or ask or '0'))
                 delta=exec_qty-c.sell_filled_qty
-                if delta>0: c.apply_sell_fill(delta, px); self.logger.log('INFO', f'[SELL] partial filled={c.sell_filled_qty}')
+                if delta>0: c.apply_sell_fill(delta, px); self._last_fill_time=time.strftime('%H:%M:%S', time.gmtime()); self.logger.log('INFO', f'[SELL] partial filled={c.sell_filled_qty}'); self.refresh_orders(True)
+                working_sell_price = Decimal(str(st.get('price') or c.sell_avg_price or '0'))
+                spread_ready = self._spread_metrics and self._spread_metrics.state.readiness == ReadinessState.READY
+                if status in ('NEW', 'PARTIALLY_FILLED') and self.cfg.get('reprice_on_move', True) and ask > 0 and ask != working_sell_price and spread_ready and ask > working_sell_price:
+                    self.logger.log('INFO','[SELL] cancel requested reprice')
+                    self.orders.cancel(c.sell_order_id); self.refresh_orders(True); self.logger.log('INFO','[SELL] canceled')
+                    old,new=c.transition(CycleState.PLACE_SELL,'sell reprice'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell reprice')
+                    return
                 if status=='FILLED':
                     old,new=c.transition(CycleState.PROFIT_LOCKED,'sell filled'); self.logger.log('INFO','[SELL] filled'); self.logger.log('INFO', f'[PNL] realized={c.realized_pnl}'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell filled')
             if c.state == CycleState.PROFIT_LOCKED:
-                old,new=c.transition(CycleState.IDLE,'cycle done'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done'); self._live_running=False
+                self._cycle_started_at=time.time(); old,new=c.transition(CycleState.WAIT_READY,'cycle done'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done')
         except Exception as e:
             self.logger.log('ERROR', f'[LIVE] runtime error: {e}')
             if hasattr(e, 'code') or hasattr(e, 'message'):
@@ -380,7 +408,8 @@ class MainWindow(QMainWindow):
 
     def _sync_cycle_state_labels(self):
         c = self._cycle
-        self.cs_state.setText(c.state.value); self.cs_target.setText(str(c.target_qty)); self.cs_bought.setText(str(c.buy_filled_qty)); self.cs_sold.setText(str(c.sell_filled_qty)); self.cs_open.setText(str(c.open_position_qty)); self.cs_avg_buy.setText(str(c.buy_avg_price)); self.cs_avg_sell.setText(str(c.sell_avg_price)); self.cs_pnl.setText(str(c.realized_pnl)); self.cs_order.setText(str(c.sell_order_id or c.buy_order_id or '-')); self.cs_reason.setText(c.reason or '-')
+        buy_remaining=max(Decimal('0'), c.buy_requested_qty-c.buy_filled_qty); sell_remaining=max(Decimal('0'), c.sell_requested_qty-c.sell_filled_qty)
+        self.cs_state.setText(c.state.value); self.cs_target.setText(str(c.target_qty)); self.cs_bought.setText(str(c.buy_filled_qty)); self.cs_sold.setText(str(c.sell_filled_qty)); self.cs_open.setText(str(c.open_position_qty)); self.cs_avg_buy.setText(str(c.buy_avg_price)); self.cs_avg_sell.setText(str(c.sell_avg_price)); self.cs_pnl.setText(str(c.realized_pnl)); self.cs_order.setText(str(c.sell_order_id or c.buy_order_id or '-')); self.cs_reason.setText(c.reason or '-'); self.cs_buy_working.setText(str(self._orders_by_id.get(c.buy_order_id, {}).get('price', '-'))); self.cs_sell_working.setText(str(self._orders_by_id.get(c.sell_order_id, {}).get('price', '-'))); self.cs_buy_remaining.setText(str(buy_remaining)); self.cs_sell_remaining.setText(str(sell_remaining)); self.cs_cycle_age.setText(f"{int((time.time()-self._cycle_started_at)*1000)} ms"); self.cs_last_fill.setText(self._last_fill_time)
     def _get_exchange_info(self): return self.client.get_exchange_info(self.cfg['symbol'])
     def _load_exchange_filters(self):
         try:
