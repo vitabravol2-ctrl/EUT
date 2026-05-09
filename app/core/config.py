@@ -30,6 +30,8 @@ DEFAULT_CONFIG = {
     'max_cycle_age_sec': 300,
     'stop_after_n_failed_cycles': 3,
     'risk_guard_enabled': False,
+    'max_long_inventory_euri': 500.0,
+    'max_short_inventory_euri': -500.0,
 }
 
 

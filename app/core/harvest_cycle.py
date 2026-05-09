@@ -55,6 +55,10 @@ class HarvestCycle:
     closed_qty: Decimal = Decimal('0')
     realized_pnl: Decimal = Decimal('0')
     fees: Decimal = Decimal('0')
+
+    inventory_euri: Decimal = Decimal('0')
+    inventory_usdt: Decimal = Decimal('0')
+    net_inventory_euri: Decimal = Decimal('0')
     started_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     reason: str = ''
@@ -73,6 +77,9 @@ class HarvestCycle:
         self.buy_filled_qty += fill_qty
         self.open_position_qty += fill_qty
         self.buy_avg_price = (cost_before + (fill_qty * fill_price)) / self.buy_filled_qty
+        self.inventory_euri += fill_qty
+        self.inventory_usdt -= fill_qty * fill_price
+        self.net_inventory_euri = self.inventory_euri - self.sell_filled_qty
         self.updated_at = _now()
 
     def apply_sell_fill(self, fill_qty: Decimal, fill_price: Decimal) -> None:
@@ -85,6 +92,9 @@ class HarvestCycle:
         self.open_position_qty -= qty
         self.closed_qty += qty
         self.realized_pnl += (fill_price - self.buy_avg_price) * qty
+        self.inventory_euri -= qty
+        self.inventory_usdt += qty * fill_price
+        self.net_inventory_euri = self.buy_filled_qty - self.sell_filled_qty
         self.updated_at = _now()
 
     def next_state_after_buy_cancel(self) -> CycleState:
