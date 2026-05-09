@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -101,6 +102,7 @@ class MainWindow(QMainWindow):
         self._harvest_engine = HarvestReadinessEngine()
         self._harvest_result = None
         self._last_harvest_state = None
+        self._status_badges = {}
 
         self.task_runner = TaskRunner(4, self)
         self.task_runner.signals.success.connect(self._on_task_success)
@@ -153,29 +155,36 @@ class MainWindow(QMainWindow):
 
         self.s, self.m, self.b = {}, {}, {}
 
-        top = QGroupBox('Статус системы')
-        top.setMinimumHeight(90)
-        top.setMaximumHeight(110)
-        top_l = QGridLayout(top)
-        status_keys = ['Публичный REST', 'Аккаунт', 'Опрос', 'Приватный канал', 'Торговля', 'Только чтение', 'WS', 'Задержка', 'HARVEST']
-        for i, k in enumerate(status_keys):
-            top_l.addWidget(QLabel(f'{k}:'), i // 5, (i % 5) * 2)
-            self.s[k] = self._value('-')
-            top_l.addWidget(self.s[k], i // 5, (i % 5) * 2 + 1)
+        top = QGroupBox('Status Strip')
+        top.setMinimumHeight(64)
+        top.setMaximumHeight(86)
+        top_l = QHBoxLayout(top)
+        top_l.setSpacing(8)
+        for label, key in [('REST', 'Публичный REST'), ('ACCOUNT', 'Аккаунт'), ('PRIVATE', 'Приватный канал'), ('TRADING', 'Торговля'), ('LATENCY', 'Задержка'), ('HARVEST', 'HARVEST')]:
+            badge = QLabel(f'{label} ● -')
+            badge.setStyleSheet('padding: 3px 8px; border: 1px solid #283241; border-radius: 10px; color: #8b949e;')
+            self._status_badges[key] = badge
+            self.s[key] = badge
+            top_l.addWidget(badge)
         self.settings_btn = self._btn('Настройки', self.open_settings)
         self.diag_btn = self._btn('Проверить систему', self.run_diagnostics)
-        top_l.addWidget(self.settings_btn, 2, 8)
-        top_l.addWidget(self.diag_btn, 2, 9)
+        top_l.addStretch(1)
+        top_l.addWidget(self.settings_btn)
+        top_l.addWidget(self.diag_btn)
         main.addWidget(top)
 
         center_splitter = QSplitter(Qt.Horizontal)
 
         left_col = QWidget()
         left_l = QVBoxLayout(left_col)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_inner = QWidget()
+        left_inner_l = QVBoxLayout(left_inner)
 
-        market_box = QGroupBox('Рынок')
+        market_box = QGroupBox('Market Summary')
         market_f = QFormLayout(market_box)
-        for key in ['Последняя', 'Bid', 'Ask', 'Спред', 'Возраст REST']:
+        for key in ['Последняя', 'Bid', 'Ask', 'Спред', 'Тики', 'Lifetime', 'Stable', 'Latency', 'Возраст REST']:
             self.m[key] = self._value('0.00000000' if key != 'Возраст REST' else '-')
             market_f.addRow(QLabel(key), self.m[key])
         market_btns = QHBoxLayout()
@@ -184,25 +193,28 @@ class MainWindow(QMainWindow):
         market_btns.addWidget(self._btn('Стоп опроса', self.stop_polling))
         market_f.addRow(market_btns)
 
-        spread_box = QGroupBox('Спред')
-        spread_f = QFormLayout(spread_box)
-        for key in ['Спред', 'Тики', 'Lifetime', 'Stable']:
-            self.m[key] = self._value('0.00000000' if key == 'Спред' else '-')
-            spread_f.addRow(QLabel(key), self.m[key])
-
-        balances_box = QGroupBox('Балансы')
+        balances_box = QGroupBox('Balances Summary')
         bal_f = QFormLayout(balances_box)
-        bal_keys = ['USDT свободно', 'USDT заблокировано', 'EURI свободно', 'EURI заблокировано', 'Оценка всего USDT']
+        bal_keys = ['USDT свободно', 'USDT заблокировано', 'EURI свободно', 'EURI заблокировано', 'USDT total', 'EURI total', 'Оценка всего USDT']
         for key in bal_keys:
             self.b[key] = self._value('0.00000000')
             bal_f.addRow(QLabel(key), self.b[key])
         self.balance_refresh_btn = self._btn('Обновить балансы', self.refresh_balances)
         bal_f.addRow(self.balance_refresh_btn)
 
-        left_l.addWidget(market_box)
-        left_l.addWidget(spread_box)
-        left_l.addWidget(balances_box)
-        left_l.addStretch(1)
+        settings_box = QGroupBox('Trade Settings — coming next')
+        settings_f = QFormLayout(settings_box)
+        settings_f.addRow('Mode', QLabel('Manual'))
+        settings_f.addRow('Max order USDT', QLabel('-'))
+        settings_f.addRow('Min spread ticks', QLabel('-'))
+        settings_f.addRow('Risk guard', QLabel('OFF'))
+
+        left_inner_l.addWidget(market_box)
+        left_inner_l.addWidget(balances_box)
+        left_inner_l.addWidget(settings_box)
+        left_inner_l.addStretch(1)
+        left_scroll.setWidget(left_inner)
+        left_l.addWidget(left_scroll)
 
         center_col = QWidget()
         center_l = QVBoxLayout(center_col)
@@ -232,6 +244,10 @@ class MainWindow(QMainWindow):
 
         right_col = QWidget()
         right_l = QVBoxLayout(right_col)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_inner = QWidget()
+        right_inner_l = QVBoxLayout(right_inner)
 
         manual_box = QGroupBox('Ручная торговля')
         manual_f = QFormLayout(manual_box)
@@ -243,6 +259,16 @@ class MainWindow(QMainWindow):
         manual_f.addRow('Цена', self.price)
         manual_f.addRow('Количество', self.qty)
         manual_f.addRow('Сумма', self.total)
+        quick_price = QHBoxLayout()
+        self.price_bid_btn = self._btn('Цена = Bid', self._fill_price_bid)
+        self.price_ask_btn = self._btn('Цена = Ask', self._fill_price_ask)
+        quick_price.addWidget(self.price_bid_btn); quick_price.addWidget(self.price_ask_btn)
+        manual_f.addRow(quick_price)
+        quick_qty = QHBoxLayout()
+        self.qty_max_btn = self._btn('Qty max EURI', self._fill_qty_max_euri)
+        self.qty_10_btn = self._btn('Qty на 10 USDT', self._fill_qty_for_10_usdt)
+        quick_qty.addWidget(self.qty_max_btn); quick_qty.addWidget(self.qty_10_btn)
+        manual_f.addRow(quick_qty)
         self.buy_btn = self._btn('Купить LIMIT', lambda: self.place('BUY'))
         self.sell_btn = self._btn('Продать LIMIT', lambda: self.place('SELL'))
         trade_btns = QHBoxLayout(); trade_btns.addWidget(self.buy_btn); trade_btns.addWidget(self.sell_btn)
@@ -264,19 +290,20 @@ class MainWindow(QMainWindow):
             self.s[key] = self._value('-')
             exec_f.addRow(QLabel(key), self.s[key])
 
-        right_l.addWidget(manual_box)
-        right_l.addWidget(activity_box)
-        right_l.addWidget(fsm_box)
-        right_l.addWidget(exec_box)
-
         harvest_box = QGroupBox('Harvest Readiness')
         harvest_f = QFormLayout(harvest_box)
         for key in ['Harvest state', 'Harvest score', 'Harvest reason', 'Spread OK', 'Stability OK', 'Latency OK', 'Queue OK', 'Entry', 'Exit', 'Suggested']:
             self.s[key] = self._value('-')
             harvest_f.addRow(QLabel(key), self.s[key])
 
-        right_l.addWidget(harvest_box)
-        right_l.addStretch(1)
+        right_inner_l.addWidget(harvest_box)
+        right_inner_l.addWidget(manual_box)
+        right_inner_l.addWidget(activity_box)
+        right_inner_l.addWidget(fsm_box)
+        right_inner_l.addWidget(exec_box)
+        right_inner_l.addStretch(1)
+        right_scroll.setWidget(right_inner)
+        right_l.addWidget(right_scroll)
 
         center_splitter.addWidget(left_col)
         center_splitter.addWidget(center_col)
@@ -381,6 +408,12 @@ class MainWindow(QMainWindow):
             self.b['USDT заблокировано'].setText(f"{Decimal(str(bal.get('USDT_locked', 0))):.8f}")
             self.b['EURI свободно'].setText(f"{Decimal(str(bal.get('EURI_free', 0))):.8f}")
             self.b['EURI заблокировано'].setText(f"{Decimal(str(bal.get('EURI_locked', 0))):.8f}")
+            usdt_total = Decimal(str(bal.get('USDT_free', 0))) + Decimal(str(bal.get('USDT_locked', 0)))
+            euri_total = Decimal(str(bal.get('EURI_free', 0))) + Decimal(str(bal.get('EURI_locked', 0)))
+            self.b['USDT total'].setText(f"{usdt_total:.8f}")
+            self.b['USDT total'].setToolTip(f"free={self.b['USDT свободно'].text()}\nlocked={self.b['USDT заблокировано'].text()}")
+            self.b['EURI total'].setText(f"{euri_total:.8f}")
+            self.b['EURI total'].setToolTip(f"free={self.b['EURI свободно'].text()}\nlocked={self.b['EURI заблокировано'].text()}")
             self.b['Оценка всего USDT'].setText(f"{Decimal(str(bal.get('equity_usdt', 0))):.8f}")
             self.runtime.mark_balances_update()
             self._recompute_harvest_readiness()
@@ -474,17 +507,15 @@ class MainWindow(QMainWindow):
         self.logger.log('ИНФО', 'Диагностика завершена')
 
     def _tick_status(self):
-        self.s['Публичный REST'].setText('OK')
-        self.s['Аккаунт'].setText(self.runtime.account_auth_state)
-        self.s['Опрос'].setText('RUNNING' if self.polling.running else 'STOPPED')
-        self.s['Приватный канал'].setText(self.runtime.private_polling_state)
-        self.s['Торговля'].setText('ON' if self.cfg.get('trading_enabled', False) else 'OFF')
-        self.s['Только чтение'].setText('ON' if self.cfg.get('read_only', True) else 'OFF')
-        self.s['WS'].setText('ON' if self.ws.enabled else 'OFF')
+        self._set_status_badge('Публичный REST', 'OK', 'Public market REST calls are healthy')
+        self._set_status_badge('Аккаунт', self.runtime.account_auth_state, 'Binance account auth state')
+        self._set_status_badge('Приватный канал', self.runtime.private_polling_state, 'Private polling gate')
+        self._set_status_badge('Торговля', 'ON' if self.cfg.get('trading_enabled', False) else 'OFF', 'Global trading switch')
         latency = self.runtime.last_public_latency_ms or '0ms'
         if self.runtime.last_latency_ms > self._latency_warning_ms:
             latency = f'{latency} WARNING'
-        self.s['Задержка'].setText(latency)
+        self._set_status_badge('Задержка', str(latency), 'Observed market request latency')
+        self.m['Latency'].setText(str(latency))
         self._set_harvest_badge()
         self._refresh_order_ages()
         self._update_order_activity()
@@ -536,6 +567,25 @@ class MainWindow(QMainWindow):
             'BLOCKED': '#f85149',
         }
         self.s['HARVEST'].setStyleSheet(f"color: {color_map.get(state, '#8b949e')}; font-weight: 700;")
+        self._set_status_badge('HARVEST', state, state)
+
+    def _set_status_badge(self, key: str, value: str, details: str = ''):
+        badge = self._status_badges.get(key)
+        if not badge:
+            return
+        text_key = next((k for k, v in [('Публичный REST', 'REST'), ('Аккаунт', 'ACCOUNT'), ('Приватный канал', 'PRIVATE'), ('Торговля', 'TRADING'), ('Задержка', 'LATENCY'), ('HARVEST', 'HARVEST')] if k == key), None)
+        title = {'Публичный REST': 'REST', 'Аккаунт': 'ACCOUNT', 'Приватный канал': 'PRIVATE', 'Торговля': 'TRADING', 'Задержка': 'LATENCY', 'HARVEST': 'HARVEST'}.get(key, key)
+        color = '#8b949e'
+        val = str(value).upper()
+        if any(x in val for x in ['OK', 'READY', 'ON', 'CONNECTED']):
+            color = '#2ea043'
+        elif any(x in val for x in ['WARN', 'WATCH', 'RUNNING']):
+            color = '#d29922'
+        elif any(x in val for x in ['ERROR', 'BLOCKED', 'AUTH_ERROR']):
+            color = '#f85149'
+        badge.setText(f'{title} ● {value}')
+        badge.setStyleSheet(f'padding: 3px 8px; border: 1px solid #283241; border-radius: 10px; color: {color}; font-weight: 600;')
+        badge.setToolTip(details or str(value))
 
     def _log_harvest_state_if_changed(self):
         if not self._harvest_result:
@@ -575,6 +625,25 @@ class MainWindow(QMainWindow):
         except Exception:
             tick_val = 0.0
         self._spread_stability = self._spread_analyzer.classify(tick_val, lifetime)
+        if spread > 0 and (ticks == '-' or ticks is None):
+            self.m['Тики'].setText('1+')
+
+    def _fill_price_bid(self):
+        self.price.setText(self.m['Bid'].text())
+
+    def _fill_price_ask(self):
+        self.price.setText(self.m['Ask'].text())
+
+    def _fill_qty_max_euri(self):
+        self.qty.setText(self.b['EURI свободно'].text())
+
+    def _fill_qty_for_10_usdt(self):
+        try:
+            price = Decimal(self.price.text() or self.m['Ask'].text())
+            if price > 0:
+                self.qty.setText(f"{(Decimal('10') / price):.8f}")
+        except Exception:
+            return
 
     def _on_order_selected(self):
         row = self.table.currentRow()
