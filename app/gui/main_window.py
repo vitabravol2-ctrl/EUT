@@ -88,7 +88,9 @@ class MainWindow(QMainWindow):
         self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
         self._cycle=HarvestCycle()
         self._active_buy_order_id=None; self._active_sell_order_id=None
+        self._pending_buy_grace_until=0.0; self._pending_buy_order=None
         self._pending_sell_grace_until=0.0; self._pending_sell_order=None
+        self._order_visibility_grace_sec=3.0
         self._last_reprice_at=0.0; self._reprice_throttle_sec=0.4
         self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
         self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0; self._cycle_started_at=time.time(); self._last_fill_time='-'
@@ -300,6 +302,9 @@ class MainWindow(QMainWindow):
 
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
 
+            buy_grace_active = c.buy_order_id and time.time() < self._pending_buy_grace_until
+            sell_grace_active = c.sell_order_id and time.time() < self._pending_sell_grace_until
+
             # BUY maintain
             if net_inv < max_long:
                 buy_status = None
@@ -318,15 +323,27 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         self.logger.log('INFO', f'[RUNTIME] reconcile BUY status fetch failed -> {e}')
                         buy_status = None
-                if c.buy_order_id and c.buy_order_id not in open_order_ids:
+                if c.buy_order_id and c.buy_order_id in open_order_ids:
+                    self.logger.log('INFO', '[BUY] confirmed on exchange')
+                    if self._pending_buy_order == c.buy_order_id:
+                        self._pending_buy_order = None
+                        self._pending_buy_grace_until = 0.0
+                if c.buy_order_id and c.buy_order_id not in open_order_ids and buy_grace_active:
+                    self.logger.log('INFO', '[BUY] grace window active')
+                    self.logger.log('INFO', '[BUY] waiting exchange visibility')
+                    self.logger.log('INFO', '[RUNTIME] BUY pending exchange visibility')
+                    self.logger.log('INFO', '[BUY] reconcile skipped (fresh order)')
+                elif c.buy_order_id and c.buy_order_id not in open_order_ids:
                     self.logger.log('INFO', '[RUNTIME] BUY vanished')
                     self.logger.log('INFO', '[RUNTIME] reconcile BUY')
                     self.logger.log('INFO', '[RUNTIME] registry cleaned')
                     self.logger.log('INFO', '[RUNTIME] optimistic cleared')
-                if should_clear_active_order(c.buy_order_id, buy_status, open_order_ids):
+                if should_clear_active_order(c.buy_order_id, buy_status, open_order_ids) and not buy_grace_active:
                     c.buy_order_id = None
                     self._active_buy_order_id = None
-                if not c.buy_order_id:
+                    self._pending_buy_order = None
+                    self._pending_buy_grace_until = 0.0
+                if not c.buy_order_id and not buy_grace_active and not self._pending_buy_order:
                     quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
                     qty_n = floor_to_step(quote / bid, step) if bid > 0 else Decimal('0')
                     if qty_n > 0:
@@ -336,8 +353,12 @@ class MainWindow(QMainWindow):
                         c.buy_requested_qty = qty_n
                         c.target_qty = qty_n
                         self._active_buy_order_id = c.buy_order_id
+                        self._pending_buy_order = c.buy_order_id
+                        self._pending_buy_grace_until = time.time() + self._order_visibility_grace_sec
                         self._buy_started_at = time.time()
                         self.cs_top_bid_status.setText('WORKING')
+                elif c.buy_order_id or buy_grace_active or self._pending_buy_order:
+                    self.logger.log('INFO', '[BUY] existing quote active')
                 else:
                     ob = self._orders_by_id.get(c.buy_order_id, {})
                     working_price = Decimal(str(ob.get('price') or bid))
@@ -392,15 +413,27 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         self.logger.log('INFO', f'[RUNTIME] reconcile SELL status fetch failed -> {e}')
                         sell_status = None
-                if c.sell_order_id and c.sell_order_id not in open_order_ids:
+                if c.sell_order_id and c.sell_order_id in open_order_ids:
+                    self.logger.log('INFO', '[SELL] confirmed on exchange')
+                    if self._pending_sell_order == c.sell_order_id:
+                        self._pending_sell_order = None
+                        self._pending_sell_grace_until = 0.0
+                if c.sell_order_id and c.sell_order_id not in open_order_ids and sell_grace_active:
+                    self.logger.log('INFO', '[SELL] grace window active')
+                    self.logger.log('INFO', '[SELL] waiting exchange visibility')
+                    self.logger.log('INFO', '[RUNTIME] SELL pending exchange visibility')
+                    self.logger.log('INFO', '[SELL] reconcile skipped (fresh order)')
+                elif c.sell_order_id and c.sell_order_id not in open_order_ids:
                     self.logger.log('INFO', '[RUNTIME] SELL vanished -> reconciled')
                     self.logger.log('INFO', '[RUNTIME] reconcile SELL')
                     self.logger.log('INFO', '[RUNTIME] registry cleaned')
                     self.logger.log('INFO', '[RUNTIME] optimistic cleared')
-                if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids):
+                if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids) and not sell_grace_active:
                     c.sell_order_id = None
                     self._active_sell_order_id = None
-                if not c.sell_order_id:
+                    self._pending_sell_order = None
+                    self._pending_sell_grace_until = 0.0
+                if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
                     sell_qty = available_sell_qty
                     if sell_qty > 0:
                         min_sell = c.buy_avg_price + tick if c.buy_avg_price > 0 else ask
@@ -409,6 +442,8 @@ class MainWindow(QMainWindow):
                         c.sell_order_id = int(resp.get('orderId'))
                         c.sell_requested_qty = sell_qty
                         self._active_sell_order_id = c.sell_order_id
+                        self._pending_sell_order = c.sell_order_id
+                        self._pending_sell_grace_until = time.time() + self._order_visibility_grace_sec
                         self._sell_started_at = time.time()
                         self.cs_top_ask_status.setText('WORKING')
                 else:
