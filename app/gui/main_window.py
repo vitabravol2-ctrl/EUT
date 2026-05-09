@@ -18,6 +18,7 @@ from app.core.logger import AppLogger
 from app.core.market_service import MarketService
 from app.core.order_service import OrderService
 from app.core.polling_manager import PollingManager
+from app.core.spread_stability_engine import ReadinessState, SpreadStabilityEngine
 from app.core.runtime_state import RuntimeState
 from app.core.ws_manager import WSManager
 from app.gui.panels.log_panel import LogPanel
@@ -77,9 +78,11 @@ class MainWindow(QMainWindow):
         self.logger=AppLogger(max_records=500,dedupe_seconds=30); self.cfg=load_config(); self.runtime=RuntimeState(); self.ws=WSManager(enabled=False)
         self._last_market_snapshot={}; self._last_open_orders=[]; self._balances={}; self._status_badges={}; self._orders_by_id={}; self._selected_order_id=None
         self._spread_analyzer=SpreadStabilityAnalyzer(); self._queue_estimator=QueueQualityEstimator(); self._harvest_engine=HarvestReadinessEngine(); self._private_ok=False
+        self._spread_engine=SpreadStabilityEngine(Decimal('0.0001'), int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('stable_ms',3000)))
+        self._spread_metrics=None; self._last_spread_readiness=None
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
-        self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,1000,3000,3000,self)
+        self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,3000,3000,self)
         self._status_timer=QTimer(self); self._status_timer.timeout.connect(self._tick_status); self._status_timer.start(300); QTimer.singleShot(50,self._startup_connect_flow)
     def _init_services(self):
         self.client=BinanceClient(self.cfg['api_key'],self.cfg['api_secret'],self.cfg['testnet'],self.cfg.get('request_timeout_sec',3)); self.market=MarketService(self.client,self.cfg['symbol']); self.account=AccountService(self.client); self.orders=OrderService(self.client,self.cfg['symbol'])
@@ -93,10 +96,13 @@ class MainWindow(QMainWindow):
         for n,w in [('Symbol',self.ts_symbol),('Mode',self.ts_mode),('Side',self.ts_side),('Order quote USDT',self.ts_quote),('Qty EURI',self.ts_qty),('Price',self.ts_price),('Min spread ticks',self.ts_min),('Stable ms',self.ts_stable),('Max order age sec',self.ts_age),('Max active orders',self.ts_active),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         fl.addRow(self._btn('Edit Settings', self.open_trade_settings))
         center=QGroupBox('Open Orders'); cl=QVBoxLayout(center); self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(['ID','Side','Price','Qty','Filled','%','Status','Age']); self.table.itemSelectionChanged.connect(self._on_order_selected); self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive); cl.addWidget(self.table); self.no_orders=QLabel('No open orders'); cl.addWidget(self.no_orders)
+        spread_box=QGroupBox('Spread Stability'); sl=QFormLayout(spread_box)
+        self.ss_ticks=QLabel('-'); self.ss_lifetime=QLabel('-'); self.ss_bid=QLabel('-'); self.ss_ask=QLabel('-'); self.ss_ratio=QLabel('-'); self.ss_collapse=QLabel('0'); self.ss_readiness=QLabel('NOT_READY')
+        for n,w in [('Spread ticks',self.ss_ticks),('Spread lifetime',self.ss_lifetime),('Bid stable',self.ss_bid),('Ask stable',self.ss_ask),('Stable ratio',self.ss_ratio),('Collapse count',self.ss_collapse),('Readiness',self.ss_readiness)]: sl.addRow(n,w)
         right=QGroupBox('Actions'); rl=QVBoxLayout(right)
         for t,f in [('Manual Order',self.open_manual_order),('Cancel Selected',self.cancel_selected),('Cancel All',self.cancel_all),('All Data',self.open_all_data),('Settings',self.open_settings)]: rl.addWidget(self._btn(t,f))
         self.cancel_selected_btn=right.findChildren(QPushButton)[1]; self.cancel_all_btn=right.findChildren(QPushButton)[2]
-        split.addWidget(left); split.addWidget(center); split.addWidget(right); main.addWidget(split)
+        split.addWidget(left); split.addWidget(center); split.addWidget(spread_box); split.addWidget(right); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
     def _startup_connect_flow(self): self.refresh_market(True); self.refresh_balances(True); self.refresh_orders(True); self.start_polling()
@@ -111,7 +117,22 @@ class MainWindow(QMainWindow):
     def refresh_balances(self,force=False): self.task_runner.run_task('balances', lambda: self.account.balances(Decimal(str(self._last_market_snapshot.get('last',0) or 0))))
     def refresh_orders(self,force=False): self.task_runner.run_task('orders', self.orders.open_orders)
     def _on_task_success(self,name,payload):
-        if name=='market': self._last_market_snapshot=dict(payload)
+        if name=='market':
+            self._last_market_snapshot=dict(payload)
+            metrics=self._spread_engine.observe(Decimal(str(payload.get('bid',0))), Decimal(str(payload.get('ask',0))), float(payload.get('latency_ms',0)))
+            self._spread_metrics=metrics
+            self.ss_ticks.setText(f"{metrics.snapshot.spread_ticks:.2f}")
+            self.ss_lifetime.setText(f"{metrics.state.spread_lifetime_ms}ms")
+            self.ss_bid.setText(f"{metrics.state.best_bid_unchanged_ms}ms")
+            self.ss_ask.setText(f"{metrics.state.best_ask_unchanged_ms}ms")
+            self.ss_ratio.setText(f"{metrics.state.stable_spread_ratio*100:.0f}%")
+            self.ss_collapse.setText(str(metrics.state.spread_collapse_count))
+            self.ss_readiness.setText(metrics.state.readiness.value)
+            if metrics.state.readiness != self._last_spread_readiness:
+                self.logger.log('INFO', f"[SPREAD] {metrics.state.readiness.value} spread={metrics.snapshot.spread_ticks:.2f} lifetime={metrics.state.spread_lifetime_ms}ms")
+                self._last_spread_readiness=metrics.state.readiness
+            if metrics.state.spread_collapse_count > 0 and metrics.state.readiness == ReadinessState.NOT_READY:
+                self.logger.log('INFO', '[SPREAD] COLLAPSE')
         elif name=='balances': self._balances=payload; self._private_ok=True
         elif name=='orders': self._last_open_orders=payload; self._private_ok=True; self._render_orders(payload); self.logger.log('INFO', f"[ORDERS] refreshed count={len(payload)}")
     def _on_task_error(self,name,err):
@@ -126,7 +147,7 @@ class MainWindow(QMainWindow):
         self._status_badges['SYSTEM'].setText('SYSTEM OK'); self._status_badges['TRADING'].setText(f"TRADING {'ON' if self.cfg.get('trading_enabled',False) else 'OFF'}")
         self._status_badges['EURI'].setText(f"EURI {self._fmt_bal('EURI_free')} / locked {self._fmt_bal('EURI_locked')}")
         self._status_badges['USDT'].setText(f"USDT {self._fmt_bal('USDT_free')} / locked {self._fmt_bal('USDT_locked')}")
-        spread='READY' if Decimal(self._market_ask())>Decimal(self._market_bid()) else 'WATCH'; self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
+        spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
         self._status_badges['HARVEST'].setText('HARVEST READY' if self._private_ok else 'HARVEST NOT_READY')
         self._status_badges['ORDERS'].setText(f'ORDERS {len(self._last_open_orders)}'); self._status_badges['RISK'].setText(f"RISK {'BLOCKED' if self.cfg.get('risk_guard_enabled') else 'OK'}")
         enabled=self._private_ok; self.cancel_all_btn.setEnabled(enabled); self.cancel_selected_btn.setEnabled(enabled and self._selected_order_id is not None)
