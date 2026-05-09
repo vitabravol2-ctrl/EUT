@@ -290,6 +290,10 @@ class MainWindow(QMainWindow):
                 return
             tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001')))
             step = Decimal(str(self._exchange_filters.get('stepSize', '0.0001')))
+            min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
+            spread_ticks = (ask - bid) / tick if tick > 0 else Decimal('0')
+            if spread_ticks < min_spread_ticks:
+                return
             max_long = Decimal(str(self.cfg.get('max_long_inventory_euri', 500)))
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
             net_inv = c.net_inventory_euri
@@ -302,6 +306,11 @@ class MainWindow(QMainWindow):
 
             # BUY engine (independent)
             available_buy_usdt = Decimal(str(self._balances.get('USDT_free', 0)))
+            self.logger.log('INFO', f"[ACCOUNT] free_euri={Decimal(str(self._balances.get('EURI_free', 0)))}")
+            self.logger.log('INFO', f"[ACCOUNT] free_usdt={available_buy_usdt}")
+            self.logger.log('INFO', f"[ACCOUNT] locked_euri={Decimal(str(self._balances.get('EURI_locked', 0)))}")
+            self.logger.log('INFO', f"[ACCOUNT] locked_usdt={Decimal(str(self._balances.get('USDT_locked', 0)))}")
+            self.logger.log('INFO', '[RUNTIME] exchange inventory synced')
             buy_quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
             if net_inv < max_long and available_buy_usdt >= buy_quote:
                 buy_status = None
@@ -375,12 +384,13 @@ class MainWindow(QMainWindow):
                         self.cs_top_bid_status.setText('TOP')
                         self.logger.log('INFO', '[BUY] top acquired')
 
-            # SELL maintain (inventory-driven only)
-            available_sell_qty = floor_to_step(max(Decimal('0'), c.buy_filled_qty - c.sell_filled_qty), step)
+            # SELL maintain (exchange-balance driven only)
+            exchange_free_euri = Decimal(str(self._balances.get('EURI_free', 0)))
             pending_sell_qty = Decimal('0')
             if c.sell_order_id:
                 so = self._orders_by_id.get(c.sell_order_id, {})
                 pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
+            available_sell_qty = floor_to_step(max(Decimal('0'), exchange_free_euri - pending_sell_qty), step)
             max_position = Decimal(str(self.cfg.get('max_position_euri', 0) or 0))
             exposure = (c.net_inventory_euri / max_position * Decimal('100')) if max_position > 0 else Decimal('0')
             self.cs_avail_sell_qty.setText(str(available_sell_qty))
@@ -389,7 +399,7 @@ class MainWindow(QMainWindow):
             self.cs_inv_exposure.setText(f"{exposure:.2f}%")
             if available_sell_qty <= Decimal('0') and not c.sell_order_id:
                 self.cs_top_ask_status.setText('DISABLED_NO_INV')
-                self.logger.log('INFO', '[SELL] active')
+                self.logger.log('INFO', '[SELL] disabled no exchange inventory')
             elif net_inv > max_short:
                 sell_status = None
                 if c.sell_order_id:

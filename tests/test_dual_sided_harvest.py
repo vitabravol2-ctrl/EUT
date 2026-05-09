@@ -46,7 +46,7 @@ def _ready_window():
     w._last_market_snapshot = {'bid': '1.1000', 'ask': '1.1002'}
     w._spread_metrics = type('M', (), {'state': type('S', (), {'readiness': ReadinessState.READY})()})()
     w._fill_observation = type('F', (), {'fill_possible': True})()
-    w._exchange_filters = {'tickSize': '0.0001', 'stepSize': '0.01'}
+    w._exchange_filters = {'tickSize': '0.0001', 'stepSize': '0.01', 'minQty': '0.01', 'minNotional': '5'}
     w._require_exchange_filters = lambda: True
     w.orders = _DummyOrders()
     w.refresh_orders = lambda force=False: None
@@ -144,3 +144,42 @@ def test_no_duplicate_buy_during_grace_window(qapp):
     w._last_open_orders = []
     w._run_live_cycle()
     assert len([x for x in w.orders.placed if x[0] == 'BUY']) == 1
+
+
+def test_free_euri_enables_sell_engine(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '25'
+    w._run_live_cycle()
+    assert any(side == 'SELL' for side, _, _ in w.orders.placed)
+
+
+def test_exchange_balances_override_local_inventory_for_sell(qapp):
+    w = _ready_window()
+    w._cycle.buy_filled_qty = Decimal('0')
+    w._cycle.sell_filled_qty = Decimal('0')
+    w._balances['EURI_free'] = '10'
+    w._run_live_cycle()
+    assert any(side == 'SELL' for side, _, _ in w.orders.placed)
+
+
+def test_disabled_no_inv_not_triggered_with_free_euri(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '1'
+    w._run_live_cycle()
+    assert w.cs_top_ask_status.text() != 'DISABLED_NO_INV'
+
+
+def test_continuous_dual_sided_runtime_survives_100_ticks(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '50'
+    for _ in range(120):
+        w._run_live_cycle()
+    assert w._live_running is True
+
+
+def test_buy_and_sell_coexist_simultaneously(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '20'
+    w._run_live_cycle()
+    sides = {side for side, _, _ in w.orders.placed}
+    assert 'BUY' in sides and 'SELL' in sides
