@@ -133,6 +133,19 @@ class MainWindow(QMainWindow):
     def refresh_market(self,force=False): self.task_runner.run_task('market', lambda: self.market.snapshot())
     def refresh_balances(self,force=False): self.task_runner.run_task('balances', lambda: self.account.balances(Decimal(str(self._last_market_snapshot.get('last',0) or 0))))
     def refresh_orders(self,force=False): self.task_runner.run_task('orders', self.orders.open_orders)
+    def _refresh_orders_live(self, reason: str = 'runtime'):
+        orders = self.orders.open_orders()
+        self.logger.log('INFO', f'[ORDERS] live refresh count={len(orders)} reason={reason}')
+        self._sync_open_orders(orders)
+        return orders
+
+    def _refresh_balances_live(self, reason: str = 'runtime'):
+        balances = self.account.balances(Decimal(str(self._last_market_snapshot.get('last',0) or 0)))
+        self._balances = balances
+        self._private_ok = True
+        self.logger.log('INFO', f"[BALANCE] live refresh reason={reason} EURI_free={balances.get('EURI_free', 0)}")
+        return balances
+
     def _on_task_success(self,name,payload):
         if name=='market':
             self._last_market_snapshot=dict(payload)
@@ -178,6 +191,7 @@ class MainWindow(QMainWindow):
         if name in ('orders','balances'): self._private_ok=False
     def _sync_open_orders(self, payload):
         self._last_open_orders = payload; self._private_ok = True; self._render_orders(payload)
+        self.logger.log('INFO', f'[ORDERS] gui synced count={len(payload)}')
         open_ids={int(o.get('orderId')) for o in payload if o.get('orderId')}
         if self._active_buy_order_id and self._active_buy_order_id not in open_ids:
             self.logger.log('INFO', f'[RUNTIME] active BUY resolved id={self._active_buy_order_id}')
@@ -321,7 +335,8 @@ class MainWindow(QMainWindow):
                         if delta > 0:
                             c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
                             self.logger.log('INFO', f'[BUY] fill qty={delta}')
-                            self.refresh_balances(True)
+                            self._refresh_balances_live('buy_fill')
+                            self._refresh_orders_live('buy_fill')
                             self.logger.log('INFO', '[SELL] increase quote qty=inventory refresh')
                             self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                     except Exception as e:
@@ -383,8 +398,8 @@ class MainWindow(QMainWindow):
             if c.sell_order_id:
                 so = self._orders_by_id.get(c.sell_order_id, {})
                 pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
-            available_for_sell = floor_to_step(max(Decimal('0'), exchange_free_euri + pending_sell_qty), step)
-            available_sell_qty = floor_to_step(max(Decimal('0'), exchange_free_euri - pending_sell_qty), step)
+            available_for_sell = floor_to_step(max(Decimal('0'), exchange_free_euri), step)
+            available_sell_qty = floor_to_step(max(Decimal('0'), exchange_free_euri), step)
             self.cs_avail_sell_qty.setText(str(available_sell_qty))
             self.cs_pending_sell_qty.setText(str(pending_sell_qty))
             self.cs_avail_buy_usdt.setText(f"{available_buy_usdt:.2f}")
@@ -405,6 +420,8 @@ class MainWindow(QMainWindow):
                             c.apply_sell_fill(delta, Decimal(str(st.get('price') or ask)))
                             self.logger.log('INFO', f'[SELL] fill qty={delta}')
                             self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
+                            self._refresh_balances_live('sell_fill')
+                            self._refresh_orders_live('sell_fill')
                     except Exception as e:
                         self.logger.log('INFO', f'[RUNTIME] reconcile SELL status fetch failed -> {e}')
                         sell_status = None
@@ -428,9 +445,12 @@ class MainWindow(QMainWindow):
                     self._active_sell_order_id = None
                     self._pending_sell_order = None
                     self._pending_sell_grace_until = 0.0
+                self._refresh_balances_live('pre_sell_compute')
+                self._refresh_orders_live('pre_sell_compute')
+                exchange_free_euri = Decimal(str(self._balances.get('EURI_free', 0)))
                 max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10)))
                 target_sell_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
-                target_sell_qty = min(available_for_sell, target_sell_qty)
+                target_sell_qty = min(floor_to_step(max(Decimal('0'), exchange_free_euri), step), target_sell_qty)
                 if c.sell_order_id and c.sell_order_id in open_order_ids and ask > 0 and not sell_grace_active:
                     os = self._orders_by_id.get(c.sell_order_id, {})
                     working_price = Decimal(str(os.get('price') or ask))
@@ -440,16 +460,36 @@ class MainWindow(QMainWindow):
                         self.logger.log('INFO', '[SELL] cancel for resize')
                         self.orders.cancel(c.sell_order_id)
                         self.logger.log('INFO', '[SELL] resize confirmed')
+                        self._refresh_balances_live('sell_resize_cancel')
+                        self._refresh_orders_live('sell_resize_cancel')
                         c.sell_order_id = None
                         self._active_sell_order_id = None
                         self._pending_sell_order = None
                         self._pending_sell_grace_until = 0.0
                 if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
-                    sell_qty = target_sell_qty
-                    if sell_qty > 0:
+                    sell_qty = floor_to_step(min(exchange_free_euri, target_sell_qty), step)
+                    min_qty = Decimal(str(self._symbol_filters.get('minQty', '0') or '0'))
+                    if sell_qty < min_qty:
+                        self.logger.log('INFO', '[SELL] skipped: no free inventory after refresh')
+                    elif sell_qty > 0:
                         price = floor_to_tick(ask, tick)
                         self.logger.log('INFO', f'[SELL] reposting best_ask qty={sell_qty}')
-                        resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
+                        try:
+                            resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
+                        except Exception as e:
+                            if 'insufficient' in str(e).lower() and 'balance' in str(e).lower():
+                                self._refresh_balances_live('sell_balance_error')
+                                self._refresh_orders_live('sell_balance_error')
+                                if c.sell_order_id and c.sell_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}:
+                                    c.sell_order_id = None
+                                    self._active_sell_order_id = None
+                                self._pending_sell_order = None
+                                self._pending_sell_grace_until = 0.0
+                                self._last_reprice_at = time.time() + 3.0
+                                self.logger.log('INFO', '[SELL] blocked: insufficient free EURI after refresh')
+                                self.logger.log('INFO', '[SELL] cooldown after balance error')
+                                return
+                            raise
                         c.sell_order_id = int(resp.get('orderId'))
                         c.sell_requested_qty = sell_qty
                         self._active_sell_order_id = c.sell_order_id
@@ -457,6 +497,7 @@ class MainWindow(QMainWindow):
                         self._pending_sell_grace_until = time.time() + self._order_visibility_grace_sec
                         self._sell_started_at = time.time()
                         self.cs_top_ask_status.setText('WORKING')
+                        self._refresh_orders_live('sell_place')
                 else:
                     os = self._orders_by_id.get(c.sell_order_id, {})
                     working_price = Decimal(str(os.get('price') or ask))
