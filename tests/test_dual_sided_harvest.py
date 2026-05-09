@@ -226,3 +226,29 @@ def test_missing_filters_does_not_crash_runtime(qapp):
     w._balances['EURI_free'] = '5'
     w._run_live_cycle()
     assert w._live_running is True
+
+
+def test_sell_locked_inventory_does_not_resize_down(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '31.6'
+    w._last_open_orders = [{'orderId': 99, 'side': 'SELL', 'origQty': '169.7', 'executedQty': '0', 'price': '1.1002', 'status': 'NEW'}]
+    w._orders_by_id = {99: w._last_open_orders[0]}
+    w._cycle.sell_order_id = 99
+    cancelled = []
+    w.orders.cancel = lambda order_id: cancelled.append(order_id) or {'status': 'CANCELED'}
+    w.cfg['max_sell_usdt_exposure'] = 186.75
+    w._run_live_cycle()
+    assert cancelled == []
+
+
+def test_sell_resizes_down_when_exposure_reduced(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '31.6'
+    w._last_open_orders = [{'orderId': 99, 'side': 'SELL', 'origQty': '169.7', 'executedQty': '0', 'price': '1.1002', 'status': 'NEW'}]
+    w._orders_by_id = {99: w._last_open_orders[0]}
+    w._cycle.sell_order_id = 99
+    cancelled = []
+    w.orders.cancel = lambda order_id: cancelled.append(order_id) or {'status': 'CANCELED'}
+    w.cfg['max_sell_usdt_exposure'] = 120
+    w._run_live_cycle()
+    assert cancelled == [99]
