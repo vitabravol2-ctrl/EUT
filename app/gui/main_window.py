@@ -36,19 +36,17 @@ class TradeSettingsDialog(QDialog):
         super().__init__(parent); self._on_save = on_save; self.setWindowTitle('Trade / Harvest Settings')
         l = QFormLayout(self)
         self.symbol = QLineEdit(str(cfg.get('symbol', 'EURIUSDT')))
-        self.order_quote = QLineEdit(str(cfg.get('order_quote_usdt', 10)))
-        self.max_position = QLineEdit(str(cfg.get('max_position_euri', 0)))
         self.min_spread_ticks = QLineEdit(str(cfg.get('min_spread_ticks', 2))); self.target_profit_ticks = QLineEdit(str(cfg.get('target_profit_ticks', 1))); self.stable_ms = QLineEdit(str(cfg.get('min_stable_ms', 3000)))
         self.allow_partial = QCheckBox('YES'); self.allow_partial.setChecked(bool(cfg.get('allow_partial_fills', True))); self.min_partial = QLineEdit(str(cfg.get('min_partial_fill_euri', 0)))
         self.reprice_on_move = QCheckBox('YES'); self.reprice_on_move.setChecked(bool(cfg.get('reprice_on_move', True))); self.cancel_on_collapse = QCheckBox('YES'); self.cancel_on_collapse.setChecked(bool(cfg.get('cancel_on_spread_collapse', True)))
-        self.max_buy_exposure = QLineEdit(str(cfg.get('max_buy_usdt_exposure', cfg.get('order_quote_usdt', 10))))
-        self.max_sell_exposure = QLineEdit(str(cfg.get('max_sell_usdt_exposure', cfg.get('order_quote_usdt', 10))))
+        self.max_buy_exposure = QLineEdit(str(cfg.get('max_buy_usdt_exposure', 10)))
+        self.max_sell_exposure = QLineEdit(str(cfg.get('max_sell_usdt_exposure', 10)))
         self.risk_guard = QCheckBox('Enabled'); self.risk_guard.setChecked(bool(cfg.get('risk_guard_enabled', False)))
         l.addRow('Mode', QLabel('LIVE TRADE'))
-        for n,w in [('Symbol',self.symbol),('Order quote USDT',self.order_quote),('Max BUY exposure USDT',self.max_buy_exposure),('Max SELL exposure USDT',self.max_sell_exposure),('Max position EURI',self.max_position),('Min spread ticks',self.min_spread_ticks),('Target profit ticks',self.target_profit_ticks),('Min stable ms',self.stable_ms),('Allow partial fills',self.allow_partial),('Min partial fill EURI',self.min_partial),('Reprice on bid/ask move',self.reprice_on_move),('Cancel on spread collapse',self.cancel_on_collapse),('Risk guard',self.risk_guard)]: l.addRow(n,w)
+        for n,w in [('Symbol',self.symbol),('Max BUY exposure USDT',self.max_buy_exposure),('Max SELL exposure USDT',self.max_sell_exposure),('Min spread ticks',self.min_spread_ticks),('Target profit ticks',self.target_profit_ticks),('Min stable ms',self.stable_ms),('Allow partial fills',self.allow_partial),('Min partial fill EURI',self.min_partial),('Reprice on bid/ask move',self.reprice_on_move),('Cancel on spread collapse',self.cancel_on_collapse),('Risk guard',self.risk_guard)]: l.addRow(n,w)
         row=QHBoxLayout(); row.addWidget(QPushButton('Save', clicked=self._save)); row.addWidget(QPushButton('Close', clicked=self.reject)); l.addRow(row)
     def _save(self):
-        self._on_save({'symbol': self.symbol.text().strip() or 'EURIUSDT', 'harvest_mode': 'LIVE_TRADE', 'order_quote_usdt': float(self.order_quote.text() or 10), 'max_position_euri': float(self.max_position.text() or 0), 'min_spread_ticks': int(self.min_spread_ticks.text() or 2), 'target_profit_ticks': int(self.target_profit_ticks.text() or 1), 'min_stable_ms': int(self.stable_ms.text() or 3000), 'max_buy_usdt_exposure': float(self.max_buy_exposure.text() or 10), 'max_sell_usdt_exposure': float(self.max_sell_exposure.text() or 10), 'allow_partial_fills': self.allow_partial.isChecked(), 'min_partial_fill_euri': float(self.min_partial.text() or 0), 'reprice_on_move': self.reprice_on_move.isChecked(), 'cancel_on_spread_collapse': self.cancel_on_collapse.isChecked(), 'risk_guard_enabled': self.risk_guard.isChecked()}); self.accept()
+        self._on_save({'symbol': self.symbol.text().strip() or 'EURIUSDT', 'harvest_mode': 'LIVE_TRADE', 'min_spread_ticks': int(self.min_spread_ticks.text() or 2), 'target_profit_ticks': int(self.target_profit_ticks.text() or 1), 'min_stable_ms': int(self.stable_ms.text() or 3000), 'max_buy_usdt_exposure': float(self.max_buy_exposure.text() or 10), 'max_sell_usdt_exposure': float(self.max_sell_exposure.text() or 10), 'allow_partial_fills': self.allow_partial.isChecked(), 'min_partial_fill_euri': float(self.min_partial.text() or 0), 'reprice_on_move': self.reprice_on_move.isChecked(), 'cancel_on_spread_collapse': self.cancel_on_collapse.isChecked(), 'risk_guard_enabled': self.risk_guard.isChecked()}); self.accept()
 
 class ManualOrderDialog(QDialog):
     def __init__(self, main, parent=None):
@@ -83,7 +81,7 @@ class MainWindow(QMainWindow):
         self.logger=AppLogger(max_records=500,dedupe_seconds=30); self.cfg=load_config(); self.runtime=RuntimeState(); self.ws=WSManager(enabled=False)
         self._last_market_snapshot={}; self._last_open_orders=[]; self._balances={}; self._status_badges={}; self._orders_by_id={}; self._selected_order_id=None; self._exchange_filters={}
         self._spread_analyzer=SpreadStabilityAnalyzer(); self._queue_estimator=QueueQualityEstimator(); self._harvest_engine=HarvestReadinessEngine(); self._private_ok=False
-        self._spread_engine=SpreadStabilityEngine(Decimal('0.0001'), int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)), stay_ready_ticks=int(self.cfg.get('spread_stay_ready_ticks',1)), ready_hysteresis_ms=12000)
+        self._spread_engine=SpreadStabilityEngine(Decimal('0.0001'), int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)), stay_ready_ticks=int(self.cfg.get('min_spread_ticks',2)), ready_hysteresis_ms=int(self.cfg.get('ready_drop_debounce_ms',4000)))
         self._spread_metrics=None; self._last_spread_readiness=None
         self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
         self._cycle=HarvestCycle()
@@ -106,8 +104,8 @@ class MainWindow(QMainWindow):
             b=QLabel(f'{k} -'); self._status_badges[k]=b; l.addWidget(b)
         main.addWidget(top)
         split=QSplitter(Qt.Horizontal)
-        left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_quote=QLabel(); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_max_pos=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
-        for n,w in [('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Order quote USDT',self.ts_quote),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Max position EURI',self.ts_max_pos),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
+        left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
+        for n,w in [('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         fl.addRow(self._btn('START HARVEST', self.start_harvest)); fl.addRow(self._btn('STOP HARVEST', self.stop_harvest)); fl.addRow(self._btn('Edit Settings', self.open_trade_settings))
         cycle=QGroupBox('Harvest Runtime State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
         for n,w in [('ENGINE',self.cs_state),('BUY quote',self.cs_buy_working),('SELL quote',self.cs_sell_working),('BUY status',self.cs_buy_status),('SELL status',self.cs_sell_status),('BUY top',self.cs_top_bid_status),('SELL top',self.cs_top_ask_status),('BUY exposure',self.cs_avail_buy_usdt),('SELL exposure',self.cs_avail_sell_qty),('Inventory',self.cs_open),('PnL',self.cs_pnl),('Spread state',self.ss_readiness),('BUY order id',self.cs_buy_order_id),('SELL order id',self.cs_sell_order_id),('Last fill time',self.cs_last_fill)]: cf.addRow(n,w)
@@ -189,7 +187,7 @@ class MainWindow(QMainWindow):
             self.logger.log('INFO', f'[RUNTIME] active SELL resolved id={self._active_sell_order_id}')
             self._active_sell_order_id=None
             self._pending_sell_order=None
-            def has_active_buy(self) -> bool: return self._active_buy_order_id is not None
+    def has_active_buy(self) -> bool: return self._active_buy_order_id is not None
     def has_active_sell(self) -> bool: return self._active_sell_order_id is not None
 
     def _render_orders(self,payload):
@@ -210,11 +208,6 @@ class MainWindow(QMainWindow):
             return False, 'balances not loaded'
         if self.cfg.get('risk_guard_enabled', False):
             return False, 'risk guard blocked'
-        quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
-        if quote <= 0:
-            return False, 'order quote must be > 0'
-        if Decimal(str(self._balances.get('USDT_free', 0))) < quote and self._cycle.buy_order_id is None:
-            return False, 'USDT balance too low'
         if not self._spread_metrics or self._spread_metrics.state.readiness != ReadinessState.READY:
             return False, 'spread not ready'
         if not self._fill_observation or not self._fill_observation.fill_possible:
@@ -304,7 +297,7 @@ class MainWindow(QMainWindow):
 
             # BUY engine (independent)
             available_buy_usdt = Decimal(str(self._balances.get('USDT_free', 0)))
-            buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', self.cfg.get('order_quote_usdt', 10))))
+            buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10)))
             if net_inv < max_long and available_buy_usdt >= buy_quote:
                 buy_status = None
                 if c.buy_order_id:
@@ -317,6 +310,8 @@ class MainWindow(QMainWindow):
                         if delta > 0:
                             c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
                             self.logger.log('INFO', f'[BUY] fill qty={delta}')
+                            self.refresh_balances(True)
+                            self.logger.log('INFO', '[SELL] increase quote qty=inventory refresh')
                             self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                     except Exception as e:
                         self.logger.log('INFO', f'[RUNTIME] reconcile BUY status fetch failed -> {e}')
@@ -358,7 +353,7 @@ class MainWindow(QMainWindow):
                         self.logger.log('INFO', '[BUY] outbid')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
                             self.cs_top_bid_status.setText('REPRICING')
-                            self.logger.log('INFO', '[BUY] reposting')
+                            self.logger.log('INFO', f'[BUY] reposting best_bid old={working_price} new={bid}')
                             try:
                                 self.orders.cancel(c.buy_order_id)
                             except Exception as e:
@@ -378,12 +373,10 @@ class MainWindow(QMainWindow):
                 so = self._orders_by_id.get(c.sell_order_id, {})
                 pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
             available_sell_qty = floor_to_step(max(Decimal('0'), exchange_free_euri - pending_sell_qty), step)
-            max_position = Decimal(str(self.cfg.get('max_position_euri', 0) or 0))
-            exposure = (c.net_inventory_euri / max_position * Decimal('100')) if max_position > 0 else Decimal('0')
             self.cs_avail_sell_qty.setText(str(available_sell_qty))
             self.cs_pending_sell_qty.setText(str(pending_sell_qty))
             self.cs_avail_buy_usdt.setText(f"{available_buy_usdt:.2f}")
-            self.cs_inv_exposure.setText(f"{exposure:.2f}%")
+            self.cs_inv_exposure.setText('-')
             if available_sell_qty <= Decimal('0') and not c.sell_order_id:
                 self.cs_top_ask_status.setText('DISABLED_NO_INV')
                 self.logger.log('INFO', '[SELL] disabled no exchange inventory')
@@ -424,7 +417,7 @@ class MainWindow(QMainWindow):
                     self._pending_sell_order = None
                     self._pending_sell_grace_until = 0.0
                 if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
-                    max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', self.cfg.get('order_quote_usdt', 10))))
+                    max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10)))
                     sell_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
                     sell_qty = min(available_sell_qty, sell_qty)
                     if sell_qty > 0:
@@ -445,7 +438,7 @@ class MainWindow(QMainWindow):
                         self.logger.log('INFO', '[SELL] undercut')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
                             self.cs_top_ask_status.setText('REPRICING')
-                            self.logger.log('INFO', '[SELL] reposting')
+                            self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={ask}')
                             try:
                                 self.orders.cancel(c.sell_order_id)
                             except Exception as e:
@@ -498,7 +491,7 @@ class MainWindow(QMainWindow):
     def _balance_euri(self): return f"{Decimal(str(self._balances.get('EURI_free',0))):.8f}"
     def _sync_trade_settings_labels(self):
         self.cfg['harvest_mode'] = 'LIVE_TRADE'
-        self.ts_symbol.setText(str(self.cfg.get('symbol','EURIUSDT'))); self.ts_mode.setText('LIVE TRADE'); self.ts_quote.setText(str(self.cfg.get('order_quote_usdt',10))); self.ts_buy_exp.setText(str(self.cfg.get('max_buy_usdt_exposure', self.cfg.get('order_quote_usdt',10)))); self.ts_sell_exp.setText(str(self.cfg.get('max_sell_usdt_exposure', self.cfg.get('order_quote_usdt',10)))); self.ts_max_pos.setText(str(self.cfg.get('max_position_euri',0))); self.ts_min.setText(str(self.cfg.get('min_spread_ticks',2))); self.ts_profit.setText(str(self.cfg.get('target_profit_ticks',1))); self.ts_stable.setText(str(self.cfg.get('min_stable_ms',3000))); self.ts_partial.setText('YES' if self.cfg.get('allow_partial_fills',True) else 'NO'); self.ts_min_partial.setText(str(self.cfg.get('min_partial_fill_euri',0))); self.ts_reprice.setText('YES' if self.cfg.get('reprice_on_move',True) else 'NO'); self.ts_collapse.setText('YES' if self.cfg.get('cancel_on_spread_collapse',True) else 'NO'); self.ts_risk.setText('ON' if self.cfg.get('risk_guard_enabled',False) else 'OFF')
+        self.ts_symbol.setText(str(self.cfg.get('symbol','EURIUSDT'))); self.ts_mode.setText('LIVE TRADE'); self.ts_buy_exp.setText(str(self.cfg.get('max_buy_usdt_exposure',10))); self.ts_sell_exp.setText(str(self.cfg.get('max_sell_usdt_exposure',10))); self.ts_min.setText(str(self.cfg.get('min_spread_ticks',2))); self.ts_profit.setText(str(self.cfg.get('target_profit_ticks',1))); self.ts_stable.setText(str(self.cfg.get('min_stable_ms',3000))); self.ts_partial.setText('YES' if self.cfg.get('allow_partial_fills',True) else 'NO'); self.ts_min_partial.setText(str(self.cfg.get('min_partial_fill_euri',0))); self.ts_reprice.setText('YES' if self.cfg.get('reprice_on_move',True) else 'NO'); self.ts_collapse.setText('YES' if self.cfg.get('cancel_on_spread_collapse',True) else 'NO'); self.ts_risk.setText('ON' if self.cfg.get('risk_guard_enabled',False) else 'OFF')
         self._sync_cycle_state_labels()
 
     def _sync_cycle_state_labels(self):
