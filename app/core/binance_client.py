@@ -9,7 +9,24 @@ import requests
 
 
 class BinanceAPIError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: int | None = None, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
+def normalize_binance_error(exc: Exception) -> str:
+    if isinstance(exc, requests.Timeout):
+        return 'Binance network timeout: check Internet connection.'
+    if isinstance(exc, requests.ConnectionError):
+        return 'Binance network error: check Internet connection.'
+    if isinstance(exc, BinanceAPIError):
+        if exc.code == -1021:
+            return 'Binance timestamp out of sync (-1021): sync system clock and retry.'
+        if exc.code == -2015 or exc.status_code == 401:
+            return 'Binance auth failed: check API key, IP whitelist, spot permissions, testnet/mainnet mode.'
+        return str(exc)
+    return f'Unexpected Binance error: {exc}'
 
 
 class BinanceClient:
@@ -17,6 +34,7 @@ class BinanceClient:
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = 'https://testnet.binance.vision' if testnet else 'https://api.binance.com'
+        self.recv_window = 5000
 
     def _headers(self) -> dict:
         return {'X-MBX-APIKEY': self.api_key}
@@ -24,6 +42,7 @@ class BinanceClient:
     def _sign(self, params: dict) -> dict:
         params = dict(params)
         params['timestamp'] = int(time.time() * 1000)
+        params['recvWindow'] = self.recv_window
         query = urlencode(params)
         params['signature'] = hmac.new(self.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
         return params
@@ -38,12 +57,12 @@ class BinanceClient:
                 response = requests.request(method, url, params=call_params, headers=headers, timeout=10)
                 data = response.json()
                 if response.status_code >= 400:
-                    raise BinanceAPIError(f"HTTP {response.status_code}: {data.get('msg', data)}")
+                    raise BinanceAPIError(f"HTTP {response.status_code}: {data.get('msg', data)}", code=data.get('code'), status_code=response.status_code)
                 if isinstance(data, dict) and data.get('code', 0) not in (0, None):
-                    raise BinanceAPIError(f"Binance error {data.get('code')}: {data.get('msg')}")
+                    raise BinanceAPIError(f"Binance error {data.get('code')}: {data.get('msg')}", code=data.get('code'))
                 return data
             except (requests.Timeout, requests.ConnectionError) as exc:
-                last_error = BinanceAPIError(f'Network error: {exc}')
+                last_error = BinanceAPIError(normalize_binance_error(exc))
             except ValueError as exc:
                 last_error = BinanceAPIError(f'Invalid response: {exc}')
             except BinanceAPIError as exc:
