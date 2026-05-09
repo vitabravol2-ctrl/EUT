@@ -8,13 +8,13 @@ from app.core.settings_validation import validate_settings
 class SettingsDialog(QDialog):
     def __init__(self, cfg: dict, on_save, on_test_connection, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle('Settings')
+        self.setWindowTitle('Настройки Binance')
         self.setModal(False)
         self._on_save = on_save
         self._on_test_connection = on_test_connection
 
         root = QVBoxLayout(self)
-        hint = QLabel('For real Binance: Testnet OFF, Spot permissions required, whitelist current IP, Read Only ON = no trading, Trading OFF by default.')
+        hint = QLabel('Для реального Binance: Testnet ВЫКЛ, нужны Spot-права, IP в whitelist. Режим "Только чтение" блокирует торговлю.')
         hint.setWordWrap(True)
         root.addWidget(hint)
         form = QFormLayout()
@@ -25,21 +25,21 @@ class SettingsDialog(QDialog):
         self.read_only = QCheckBox(); self.read_only.setChecked(bool(cfg.get('read_only', True)))
         self.trading_enabled = QCheckBox(); self.trading_enabled.setChecked(bool(cfg.get('trading_enabled', False)))
 
-        form.addRow('API Key', self.api_key)
-        form.addRow('API Secret', self.api_secret)
+        form.addRow('API ключ', self.api_key)
+        form.addRow('API секрет', self.api_secret)
         form.addRow('Testnet', self.testnet)
-        form.addRow('Read Only', self.read_only)
-        form.addRow('Trading Enabled', self.trading_enabled)
+        form.addRow('Только чтение', self.read_only)
+        form.addRow('Торговля включена', self.trading_enabled)
         root.addLayout(form)
 
         self.status = QLabel('')
         root.addWidget(self.status)
 
         buttons = QHBoxLayout()
-        save_btn = QPushButton('Save')
-        validate_btn = QPushButton('Validate Settings')
-        test_btn = QPushButton('Test Connection')
-        close_btn = QPushButton('Close')
+        save_btn = QPushButton('Сохранить')
+        validate_btn = QPushButton('Проверить настройки')
+        test_btn = QPushButton('Тест подключения')
+        close_btn = QPushButton('Закрыть')
         save_btn.clicked.connect(self._save)
         validate_btn.clicked.connect(self._validate)
         test_btn.clicked.connect(self._test_connection)
@@ -52,17 +52,15 @@ class SettingsDialog(QDialog):
 
     def _validate(self) -> None:
         ok, messages = validate_settings(self.values())
-        self.status.setText('OK' if ok else 'Invalid settings')
-        QMessageBox.information(self, 'Settings Validation', '\n'.join(messages))
+        self.status.setText('OK' if ok else 'Ошибка в настройках')
+        QMessageBox.information(self, 'Проверка настроек', '\n'.join(messages))
 
     def _save(self) -> None:
         self._on_save(self.values())
-        self.status.setText('Saved')
+        self.status.setText('Сохранено')
 
     def _test_connection(self) -> None:
         ok, message = self._on_test_connection(self.values())
         self.status.setText(message)
-        if ok:
-            self._on_save(self.values())
-        else:
-            QMessageBox.warning(self, 'Connection Failed', 'Binance account connection failed.\n\nCheck:\n\n• API key/secret\n• Spot permissions\n• IP whitelist\n• Testnet OFF for real Binance\n• Testnet ON only for testnet keys')
+        if not ok:
+            QMessageBox.warning(self, 'Ошибка подключения', message)

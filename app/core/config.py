@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
     'trading_enabled': False,
     'symbol': 'EURIUSDT',
     'poll_interval_ms': 1000,
+    'request_timeout_sec': 3,
 }
 
 
