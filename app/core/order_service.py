@@ -28,3 +28,9 @@ class OrderService:
 
     def order_status(self, order_id: int) -> dict:
         return self.client.get_order(self.symbol, order_id)
+
+    def place_limit_maker(self, side: str, qty: str, price: str) -> dict:
+        start = time.perf_counter()
+        resp = self.client.create_limit_maker_order(self.symbol, side=side, quantity=qty, price=price)
+        resp['_reaction_ms'] = (time.perf_counter() - start) * 1000
+        return resp
