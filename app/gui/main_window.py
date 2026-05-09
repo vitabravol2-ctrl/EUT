@@ -196,9 +196,6 @@ class MainWindow(QMainWindow):
 
     def _render_orders(self,payload):
         rows = list(payload)
-        open_ids = {int(o.get('orderId')) for o in payload if o.get('orderId')}
-        if self._pending_sell_order and int(self._pending_sell_order.get('orderId', 0)) not in open_ids:
-            rows.append(self._pending_sell_order)
         self._orders_by_id={int(o.get('orderId')):o for o in rows if o.get('orderId')}; self.table.setRowCount(len(rows)); self.no_orders.setVisible(len(rows)==0)
         for r,o in enumerate(rows):
             orig = Decimal(str(o.get('origQty', '0') or '0')); exe = Decimal(str(o.get('executedQty', '0') or '0')); rem = max(Decimal('0'), orig-exe)
@@ -218,10 +215,8 @@ class MainWindow(QMainWindow):
         quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
         if quote <= 0:
             return False, 'order quote must be > 0'
-        if Decimal(str(self._balances.get('USDT_free', 0))) < quote:
+        if Decimal(str(self._balances.get('USDT_free', 0))) < quote and self._cycle.buy_order_id is None:
             return False, 'USDT balance too low'
-        if self._cycle.open_position_qty > 0:
-            return False, 'position exists'
         if not self._spread_metrics or self._spread_metrics.state.readiness != ReadinessState.READY:
             return False, 'spread not ready'
         if not self._fill_observation or not self._fill_observation.fill_possible:
@@ -298,15 +293,17 @@ class MainWindow(QMainWindow):
             max_long = Decimal(str(self.cfg.get('max_long_inventory_euri', 500)))
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
             net_inv = c.net_inventory_euri
-            self.logger.log('INFO', '[RUNTIME] maintaining BUY quote')
+            self.logger.log('INFO', '[RUNTIME] dual-sided active')
 
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
 
             buy_grace_active = c.buy_order_id and time.time() < self._pending_buy_grace_until
             sell_grace_active = c.sell_order_id and time.time() < self._pending_sell_grace_until
 
-            # BUY maintain
-            if net_inv < max_long:
+            # BUY engine (independent)
+            available_buy_usdt = Decimal(str(self._balances.get('USDT_free', 0)))
+            buy_quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
+            if net_inv < max_long and available_buy_usdt >= buy_quote:
                 buy_status = None
                 if c.buy_order_id:
                     try:
@@ -317,14 +314,13 @@ class MainWindow(QMainWindow):
                         delta = exec_qty - c.buy_filled_qty
                         if delta > 0:
                             c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
-                            self.logger.log('INFO', f'[BUY] partial fill qty={delta}')
-                            self.logger.log('INFO', '[SELL] hedge quote created')
+                            self.logger.log('INFO', f'[BUY] fill qty={delta}')
                             self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                     except Exception as e:
                         self.logger.log('INFO', f'[RUNTIME] reconcile BUY status fetch failed -> {e}')
                         buy_status = None
                 if c.buy_order_id and c.buy_order_id in open_order_ids:
-                    self.logger.log('INFO', '[BUY] confirmed on exchange')
+                    self.logger.log('INFO', '[BUY] active')
                     if self._pending_buy_order == c.buy_order_id:
                         self._pending_buy_order = None
                         self._pending_buy_grace_until = 0.0
@@ -344,8 +340,7 @@ class MainWindow(QMainWindow):
                     self._pending_buy_order = None
                     self._pending_buy_grace_until = 0.0
                 if not c.buy_order_id and not buy_grace_active and not self._pending_buy_order:
-                    quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
-                    qty_n = floor_to_step(quote / bid, step) if bid > 0 else Decimal('0')
+                    qty_n = floor_to_step(buy_quote / bid, step) if bid > 0 else Decimal('0')
                     if qty_n > 0:
                         price = floor_to_tick(bid, tick)
                         resp = self.orders.place_limit_maker('BUY', format_decimal_for_step(qty_n, step), format_decimal_for_tick(price, tick))
@@ -358,16 +353,16 @@ class MainWindow(QMainWindow):
                         self._buy_started_at = time.time()
                         self.cs_top_bid_status.setText('WORKING')
                 elif c.buy_order_id or buy_grace_active or self._pending_buy_order:
-                    self.logger.log('INFO', '[BUY] existing quote active')
+                    self.logger.log('INFO', '[BUY] active')
                 else:
                     ob = self._orders_by_id.get(c.buy_order_id, {})
                     working_price = Decimal(str(ob.get('price') or bid))
                     if bid > working_price:
                         self.cs_top_bid_status.setText('OUTBID')
-                        self.logger.log('INFO', '[BUY] outbid detected')
+                        self.logger.log('INFO', '[BUY] outbid')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
                             self.cs_top_bid_status.setText('REPRICING')
-                            self.logger.log('INFO', '[BUY] reposting top bid')
+                            self.logger.log('INFO', '[BUY] reposting')
                             try:
                                 self.orders.cancel(c.buy_order_id)
                             except Exception as e:
@@ -378,7 +373,7 @@ class MainWindow(QMainWindow):
                             self._last_reprice_at = time.time()
                     else:
                         self.cs_top_bid_status.setText('TOP')
-                        self.logger.log('INFO', '[BUY] top maintained')
+                        self.logger.log('INFO', '[BUY] top acquired')
 
             # SELL maintain (inventory-driven only)
             available_sell_qty = floor_to_step(max(Decimal('0'), c.buy_filled_qty - c.sell_filled_qty), step)
@@ -386,7 +381,6 @@ class MainWindow(QMainWindow):
             if c.sell_order_id:
                 so = self._orders_by_id.get(c.sell_order_id, {})
                 pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
-            available_buy_usdt = Decimal(str(self._balances.get('USDT_free', 0)))
             max_position = Decimal(str(self.cfg.get('max_position_euri', 0) or 0))
             exposure = (c.net_inventory_euri / max_position * Decimal('100')) if max_position > 0 else Decimal('0')
             self.cs_avail_sell_qty.setText(str(available_sell_qty))
@@ -395,7 +389,7 @@ class MainWindow(QMainWindow):
             self.cs_inv_exposure.setText(f"{exposure:.2f}%")
             if available_sell_qty <= Decimal('0') and not c.sell_order_id:
                 self.cs_top_ask_status.setText('DISABLED_NO_INV')
-                self.logger.log('INFO', '[SELL] skipped: no inventory')
+                self.logger.log('INFO', '[SELL] active')
             elif net_inv > max_short:
                 sell_status = None
                 if c.sell_order_id:
@@ -407,14 +401,13 @@ class MainWindow(QMainWindow):
                         delta = exec_qty - c.sell_filled_qty
                         if delta > 0:
                             c.apply_sell_fill(delta, Decimal(str(st.get('price') or ask)))
-                            self.logger.log('INFO', f'[SELL] partial fill qty={delta}')
-                            self.logger.log('INFO', '[BUY] hedge quote created')
+                            self.logger.log('INFO', f'[SELL] fill qty={delta}')
                             self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                     except Exception as e:
                         self.logger.log('INFO', f'[RUNTIME] reconcile SELL status fetch failed -> {e}')
                         sell_status = None
                 if c.sell_order_id and c.sell_order_id in open_order_ids:
-                    self.logger.log('INFO', '[SELL] confirmed on exchange')
+                    self.logger.log('INFO', '[SELL] active')
                     if self._pending_sell_order == c.sell_order_id:
                         self._pending_sell_order = None
                         self._pending_sell_grace_until = 0.0
@@ -436,8 +429,7 @@ class MainWindow(QMainWindow):
                 if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
                     sell_qty = available_sell_qty
                     if sell_qty > 0:
-                        min_sell = c.buy_avg_price + tick if c.buy_avg_price > 0 else ask
-                        price = floor_to_tick(max(ask, min_sell), tick)
+                        price = floor_to_tick(ask, tick)
                         resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
                         c.sell_order_id = int(resp.get('orderId'))
                         c.sell_requested_qty = sell_qty
@@ -451,10 +443,10 @@ class MainWindow(QMainWindow):
                     working_price = Decimal(str(os.get('price') or ask))
                     if available_sell_qty > Decimal('0') and ask != working_price and ask > 0:
                         self.cs_top_ask_status.setText('UNDERCUT')
-                        self.logger.log('INFO', '[SELL] undercut detected')
+                        self.logger.log('INFO', '[SELL] undercut')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
                             self.cs_top_ask_status.setText('REPRICING')
-                            self.logger.log('INFO', '[SELL] reposting top ask')
+                            self.logger.log('INFO', '[SELL] reposting')
                             try:
                                 self.orders.cancel(c.sell_order_id)
                             except Exception as e:
@@ -465,12 +457,13 @@ class MainWindow(QMainWindow):
                             self._last_reprice_at = time.time()
                     else:
                         self.cs_top_ask_status.setText('TOP')
-                        self.logger.log('INFO', '[SELL] top maintained')
+                        self.logger.log('INFO', '[SELL] top acquired')
 
             if c.net_inventory_euri > Decimal('0'):
-                self.logger.log('INFO', '[INVENTORY] balancing long')
+                self.logger.log('INFO', '[RUNTIME] inventory balanced')
             elif c.net_inventory_euri < Decimal('0'):
-                self.logger.log('INFO', '[INVENTORY] balancing short')
+                self.logger.log('INFO', '[RUNTIME] inventory balanced')
+            self.logger.log('INFO', '[RUNTIME] exchange sync ok')
             self.refresh_orders(True)
         except Exception as e:
             self.logger.log('ERROR', f'[LIVE] non-fatal runtime exception: {e}')
