@@ -30,7 +30,7 @@ from app.core.account_service import AccountService
 from app.core.async_runner import TaskRunner
 from app.core.binance_client import BinanceClient, normalize_binance_error
 from app.core.config import load_config, save_config
-from app.core.filters import validate_order
+from app.core.filters import validate_order_from_exchange_info
 from app.core.formatting import format_age_ms
 from app.core.logger import AppLogger
 from app.core.market_service import MarketService
@@ -370,7 +370,7 @@ class MainWindow(QMainWindow):
         if not price or not qty:
             return self.logger.log('РИСК', 'Заполните цену и количество')
         self._load_filters_if_needed()
-        ok, msg = validate_order(side, price, qty, self.filters)
+        ok, msg = validate_order_from_exchange_info(price, qty, self.filters)
         if not ok:
             return self.logger.log('ОШИБКА', msg)
         if QMessageBox.question(self, 'Подтверждение ордера', f'Отправить {side} LIMIT {qty} по {price}?') != QMessageBox.Yes:
