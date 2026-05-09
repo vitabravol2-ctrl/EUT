@@ -13,7 +13,7 @@ from app.core.async_runner import TaskRunner
 from app.core.binance_client import BinanceAPIError, BinanceClient
 from app.core.config import load_config, save_config
 from app.core.execution_metrics import QueueQualityEstimator, SpreadStabilityAnalyzer
-from app.core.filters import normalize_price, normalize_qty, validate_order_from_exchange_info
+from app.core.filters import format_decimal_for_step, format_decimal_for_tick, floor_to_step, floor_to_tick, normalize_price, normalize_qty, validate_order_from_exchange_info
 from app.core.harvest_readiness import HarvestReadinessEngine
 from app.core.harvest_cycle import CycleState, HarvestCycle
 from app.core.logger import AppLogger
@@ -163,7 +163,7 @@ class MainWindow(QMainWindow):
                 self._last_spread_readiness=metrics.state.readiness
             if self._cycle.state == CycleState.IDLE:
                 old, new = self._cycle.transition(CycleState.WAIT_READY, 'boot')
-                self.logger.log('FSM', f'[FSM] {old.value} -> {new.value}')
+                self.logger.log('FSM', f'{old.value} -> {new.value} reason=boot')
             if metrics.state.spread_collapse_count > 0 and metrics.state.readiness == ReadinessState.NOT_READY:
                 self.logger.log('INFO', '[SPREAD] COLLAPSE')
         elif name=='balances': self._balances=payload; self._private_ok=True
@@ -203,6 +203,13 @@ class MainWindow(QMainWindow):
 
     def start_harvest(self):
         self.logger.log('INFO', '[LIVE] start requested')
+        if self._cycle.state == CycleState.ERROR:
+            self._cycle = HarvestCycle()
+            old, new = self._cycle.transition(CycleState.WAIT_READY, 'start reset from error')
+            self._live_running = True
+            self.logger.log('FSM', f'{CycleState.ERROR.value} -> {CycleState.RESET.value} reason=start reset')
+            self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
+            return
         ok, reason = self._risk_ok()
         if not ok:
             self.logger.log('RISK', f'[RISK] blocked: {reason}')
@@ -214,11 +221,15 @@ class MainWindow(QMainWindow):
             self._live_confirmed = True
         self._live_running = True
         old, new = self._cycle.transition(CycleState.WAIT_READY, 'start requested')
-        self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=start requested')
+        self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
 
     def stop_harvest(self):
         self._live_running = False
         self.logger.log('INFO', '[LIVE] stopped')
+        if self._cycle.state == CycleState.ERROR:
+            old, new = self._cycle.transition(CycleState.STOPPED, 'stop from error')
+            self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop from error')
+            return
         if self._cycle.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and self._cycle.buy_order_id:
             try:
                 self.orders.cancel(self._cycle.buy_order_id)
@@ -226,15 +237,15 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.logger.log('ERROR', f'[BUY] cancel failed reason={e}')
             old, new = self._cycle.transition(CycleState.STOPPED, 'stop after buy')
-            self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=stop after buy')
+            self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop after buy')
         elif self._cycle.open_position_qty > 0:
             old, new = self._cycle.transition(CycleState.EXIT_PENDING, 'stop with position')
-            self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=stop with position')
+            self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop with position')
         else:
             if self._cycle.state == CycleState.IDLE:
                 self.logger.log('INFO', '[LIVE] already idle')
             old, new = self._cycle.transition(CycleState.STOPPED, 'stop idle')
-            self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=stop idle')
+            self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop idle')
 
     def _run_live_cycle(self):
         c = self._cycle
@@ -244,7 +255,7 @@ class MainWindow(QMainWindow):
             bid = Decimal(str(self._last_market_snapshot.get('bid', '0')))
             ask = Decimal(str(self._last_market_snapshot.get('ask', '0')))
             if c.state == CycleState.WAIT_READY and self._live_running:
-                old, new = c.transition(CycleState.PLACE_BUY, 'ready'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=ready')
+                old, new = c.transition(CycleState.PLACE_BUY, 'ready'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=ready')
             if c.state == CycleState.PLACE_BUY:
                 quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
                 raw_qty = quote / bid if bid > 0 else Decimal('0')
@@ -252,8 +263,12 @@ class MainWindow(QMainWindow):
                     self.logger.log('RISK', '[RISK] blocked reason=max position EURI')
                     c.transition(CycleState.ERROR, 'max position'); return
                 info = self._get_exchange_info()
-                price = Decimal(normalize_price(str(bid), str(info.get('tickSize', '0.0001'))))
-                qty_n = Decimal(normalize_qty(str(raw_qty), str(info.get('stepSize', '0.01'))))
+                tick = Decimal(str(info.get('tickSize', '0.0001')))
+                step = Decimal(str(info.get('stepSize', '0.01')))
+                price = floor_to_tick(bid, tick)
+                qty_n = floor_to_step(raw_qty, step)
+                api_price = format_decimal_for_tick(price, tick)
+                api_qty = format_decimal_for_step(qty_n, step)
                 notional = qty_n * price
                 self.logger.log('INFO', f'[BUY] raw_qty={raw_qty}')
                 self.logger.log('INFO', f'[BUY] normalized_qty={qty_n}')
@@ -268,22 +283,32 @@ class MainWindow(QMainWindow):
                     self.logger.log('RISK', '[RISK] blocked: USDT balance too low')
                     c.transition(CycleState.ERROR, 'insufficient balance')
                     return
-                ok,msg=validate_order_from_exchange_info(str(price), str(qty_n), info)
+                ok,msg=validate_order_from_exchange_info(api_price, api_qty, info)
                 if not ok: self.logger.log('ERROR', f'[BUY] rejected reason={msg}'); c.transition(CycleState.ERROR, msg); return
-                self.logger.log('INFO', f'[BUY] placing maker price={price} qty={qty_n}')
-                resp = self.orders.place_limit_maker('BUY', str(qty_n), str(price))
+                qty_aligned = 'YES' if Decimal(api_qty) == floor_to_step(Decimal(api_qty), step) else 'NO'
+                price_aligned = 'YES' if Decimal(api_price) == floor_to_tick(Decimal(api_price), tick) else 'NO'
+                self.logger.log('INFO', f"[BUY] api_qty='{api_qty}'")
+                self.logger.log('INFO', f"[BUY] api_price='{api_price}'")
+                self.logger.log('INFO', f'[BUY] qty_aligned={qty_aligned}')
+                self.logger.log('INFO', f'[BUY] price_aligned={price_aligned}')
+                if qty_aligned == 'NO':
+                    self.logger.log('ERROR', '[BUY] rejected reason=qty not aligned to stepSize')
+                    c.transition(CycleState.ERROR, 'qty not aligned to stepSize')
+                    return
+                self.logger.log('INFO', f'[BUY] placing maker price={api_price} qty={api_qty}')
+                resp = self.orders.place_limit_maker('BUY', api_qty, api_price)
                 c.buy_order_id = int(resp.get('orderId')); c.buy_requested_qty = qty_n; c.target_qty = qty_n; self._buy_started_at = __import__('time').time()
-                old,new=c.transition(CycleState.BUY_WORKING, 'buy accepted'); self.logger.log('INFO', f"[BUY] accepted id={c.buy_order_id}"); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=buy accepted')
+                old,new=c.transition(CycleState.BUY_WORKING, 'buy accepted'); self.logger.log('INFO', f"[BUY] accepted id={c.buy_order_id}"); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy accepted')
             if c.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and c.buy_order_id:
                 st=self.orders.order_status(c.buy_order_id); status=st.get('status'); exec_qty=Decimal(str(st.get('executedQty','0'))); px=Decimal(str(st.get('price') or bid or '0'))
                 delta=exec_qty-c.buy_filled_qty
                 if delta>0: c.apply_buy_fill(delta, px); self.logger.log('INFO', f'[BUY] partial filled={c.buy_filled_qty}')
                 ttl=int(self.cfg.get('entry_order_ttl_sec',30))
                 now=__import__('time').time()
-                if status=='FILLED': old,new=c.transition(CycleState.BUY_FILLED,'buy filled'); self.logger.log('INFO','[BUY] filled'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=buy filled')
+                if status=='FILLED': old,new=c.transition(CycleState.BUY_FILLED,'buy filled'); self.logger.log('INFO','[BUY] filled'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy filled')
                 elif now-self._buy_started_at>ttl:
                     self.orders.cancel(c.buy_order_id); self.logger.log('INFO','[BUY] cancelled ttl')
-                    old,new=c.transition(CycleState.WAIT_READY if c.buy_filled_qty==0 else CycleState.PLACE_SELL,'buy ttl'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=buy ttl')
+                    old,new=c.transition(CycleState.WAIT_READY if c.buy_filled_qty==0 else CycleState.PLACE_SELL,'buy ttl'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy ttl')
             if c.state == CycleState.BUY_FILLED: c.transition(CycleState.PLACE_SELL, 'sell next')
             if c.state == CycleState.PLACE_SELL:
                 sell_qty = c.buy_filled_qty - c.sell_filled_qty
@@ -292,18 +317,18 @@ class MainWindow(QMainWindow):
                 self.logger.log('INFO', f'[SELL] placing maker price={price} qty={sell_qty}')
                 resp = self.orders.place_limit_maker('SELL', str(sell_qty), str(price))
                 c.sell_order_id = int(resp.get('orderId')); c.sell_requested_qty = sell_qty; self._sell_started_at = __import__('time').time()
-                old,new=c.transition(CycleState.SELL_WORKING,'sell accepted'); self.logger.log('INFO', f'[SELL] accepted id={c.sell_order_id}'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=sell accepted')
+                old,new=c.transition(CycleState.SELL_WORKING,'sell accepted'); self.logger.log('INFO', f'[SELL] accepted id={c.sell_order_id}'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell accepted')
             if c.state in (CycleState.SELL_WORKING, CycleState.SELL_PARTIAL, CycleState.EXIT_PENDING) and c.sell_order_id:
                 st=self.orders.order_status(c.sell_order_id); status=st.get('status'); exec_qty=Decimal(str(st.get('executedQty','0'))); px=Decimal(str(st.get('price') or ask or '0'))
                 delta=exec_qty-c.sell_filled_qty
                 if delta>0: c.apply_sell_fill(delta, px); self.logger.log('INFO', f'[SELL] partial filled={c.sell_filled_qty}')
                 if status=='FILLED':
-                    old,new=c.transition(CycleState.PROFIT_LOCKED,'sell filled'); self.logger.log('INFO','[SELL] filled'); self.logger.log('INFO', f'[PNL] realized={c.realized_pnl}'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=sell filled')
+                    old,new=c.transition(CycleState.PROFIT_LOCKED,'sell filled'); self.logger.log('INFO','[SELL] filled'); self.logger.log('INFO', f'[PNL] realized={c.realized_pnl}'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell filled')
             if c.state == CycleState.PROFIT_LOCKED:
-                old,new=c.transition(CycleState.IDLE,'cycle done'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=cycle done'); self._live_running=False
+                old,new=c.transition(CycleState.IDLE,'cycle done'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done'); self._live_running=False
         except Exception as e:
             self.logger.log('ERROR', f'[LIVE] runtime error: {e}')
-            c.transition(CycleState.ERROR, str(e))
+            old,new=c.transition(CycleState.ERROR, str(e)); self.logger.log('FSM', f'{old.value} -> {new.value} reason={str(e)}')
     def _tick_status(self):
         self._status_badges['SYSTEM'].setText('SYSTEM OK'); self._status_badges['TRADING'].setText(f"TRADING {'ON' if self.cfg.get('trading_enabled',False) else 'OFF'}")
         self._status_badges['EURI'].setText(f"EURI {self._fmt_bal('EURI_free')} / locked {self._fmt_bal('EURI_locked')}")
@@ -349,10 +374,15 @@ class MainWindow(QMainWindow):
     def place(self, side, price, qty):
         if not self._private_ok and not self.cfg.get('api_key'): self.logger.log('ERROR','[ORDER] rejected reason=private api unavailable'); return
         try:
-            ok,msg=validate_order_from_exchange_info(price,qty,self._get_exchange_info())
+            info = self._get_exchange_info()
+            tick = Decimal(str(info.get('tickSize', '0.0001')))
+            step = Decimal(str(info.get('stepSize', '0.01')))
+            api_price = format_decimal_for_tick(Decimal(str(price)), tick)
+            api_qty = format_decimal_for_step(Decimal(str(qty)), step)
+            ok,msg=validate_order_from_exchange_info(api_price, api_qty, info)
             if not ok: self.logger.log('ERROR', f'[ORDER] rejected reason={msg}'); return
-            self.logger.log('INFO', f'[ORDER] {side} LIMIT sent price={price} qty={qty}')
-            resp=self.orders.place_limit(side,qty,price); self.logger.log('INFO', f"[ORDER] accepted id={resp.get('orderId')}")
+            self.logger.log('INFO', f'[ORDER] {side} LIMIT sent price={api_price} qty={api_qty}')
+            resp=self.orders.place_limit(side,api_qty,api_price); self.logger.log('INFO', f"[ORDER] accepted id={resp.get('orderId')}")
             self.refresh_orders(True)
         except Exception as e:
             self.logger.log('ERROR', f'[ORDER] rejected reason={e}')
