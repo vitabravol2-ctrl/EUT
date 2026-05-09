@@ -4,34 +4,67 @@ import sys
 import time
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import (QApplication, QComboBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSplitter, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView)
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QHeaderView,
+)
 
 from app.core.account_service import AccountService
 from app.core.async_runner import TaskRunner
 from app.core.binance_client import BinanceClient, normalize_binance_error
 from app.core.config import load_config, save_config
 from app.core.filters import validate_order
+from app.core.formatting import format_age_ms
 from app.core.logger import AppLogger
 from app.core.market_service import MarketService
 from app.core.order_service import OrderService
 from app.core.polling_manager import PollingManager
 from app.core.runtime_state import RuntimeState
-from app.core.formatting import format_age_ms
 from app.core.ws_manager import WSManager
-from app.gui.settings_dialog import SettingsDialog
 from app.gui.panels.log_panel import LogPanel
+from app.gui.settings_dialog import SettingsDialog
 from app.gui.ui_constants import *
+
+
+DARK_STYLESHEET = """
+QWidget { background: #0b0f14; color: #e6edf3; }
+QMainWindow { background: #0b0f14; }
+QGroupBox { background: #10161d; border: 1px solid #283241; border-radius: 8px; margin-top: 10px; font-weight: 600; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #e6edf3; }
+QLabel { color: #e6edf3; }
+QLineEdit, QComboBox, QTextEdit { background: #0d131a; border: 1px solid #283241; border-radius: 4px; padding: 4px; color: #e6edf3; }
+QPushButton { background: #202a36; border: 1px solid #283241; border-radius: 4px; padding: 6px 10px; color: #e6edf3; }
+QPushButton:hover { background: #2b3746; }
+QPushButton:pressed { background: #243447; }
+QHeaderView::section { background: #18212b; color: #e6edf3; border: 1px solid #283241; padding: 5px; }
+QTableWidget { background: #111821; alternate-background-color: #10161d; gridline-color: #283241; border: 1px solid #283241; }
+QTableWidget::item:selected { background: #243447; color: #e6edf3; }
+"""
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('EUT v0.2.5 — Core Functionality Recovery + Real Binance Flow')
+        self.setWindowTitle('EUT v0.2.6 — Emergency GUI Restore + Keep Real Binance Flow')
         self.setMinimumSize(1280, 720)
         self.resize(1500, 900)
+        self.setStyleSheet(DARK_STYLESHEET)
         self.logger = AppLogger(max_records=500, dedupe_seconds=30)
         self.cfg = load_config()
         self.runtime = RuntimeState()
@@ -59,24 +92,159 @@ class MainWindow(QMainWindow):
         self.account = AccountService(self.client)
         self.orders = OrderService(self.client, self.cfg['symbol'])
 
-    # UI methods omitted unchanged from current structure for brevity in task
     def _btn(self, text, fn):
-        b = QPushButton(text); b.setMinimumHeight(BUTTON_H); b.clicked.connect(fn); return b
+        b = QPushButton(text)
+        b.setMinimumHeight(BUTTON_H)
+        b.setMinimumWidth(BUTTON_MIN_W)
+        b.clicked.connect(fn)
+        return b
+
+    def _value(self, text='-'):
+        lbl = QLabel(text)
+        lbl.setMinimumWidth(VALUE_LABEL_MIN_W)
+        return lbl
+
     def _build_ui(self):
-        self.setFont(QFont('', APP_FONT_PT)); root = QWidget(); self.setCentralWidget(root); main = QVBoxLayout(root)
-        self.s={}; self.m={}; self.b={}
-        top = QGroupBox('Статус системы'); top.setMaximumHeight(110); l=QGridLayout(top)
-        for i,k in enumerate(['Публичный REST','Аккаунт','Опрос','Приватный канал','Торговля','Только чтение','WS','Задержка']): l.addWidget(QLabel(f'{k}:'),i//4,(i%4)*2); self.s[k]=QLabel('-'); l.addWidget(self.s[k],i//4,(i%4)*2+1)
-        self.settings_btn=self._btn('Настройки',self.open_settings); self.diag_btn=self._btn('Проверить систему',self.run_diagnostics); l.addWidget(self.settings_btn,2,6); l.addWidget(self.diag_btn,2,7); main.addWidget(top)
-        self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(['ID','Сторона','Цена','Количество','Исполнено','Исполнено %','Статус','Возраст'])
-        for i,w in OPEN_ORDERS_COL_WIDTHS.items(): self.table.setColumnWidth(i,w)
-        self.side=QComboBox(); self.side.addItems(['BUY','SELL']); self.price=QLineEdit(); self.qty=QLineEdit(); self.total=QLabel('0')
-        self.buy_btn=self._btn('Купить LIMIT', lambda: self.place('BUY')); self.sell_btn=self._btn('Продать LIMIT', lambda: self.place('SELL'))
-        self.refresh_orders_btn=self._btn('Обновить', self.refresh_orders); self.cancel_btn=self._btn('Отменить выбранный', self.cancel_selected); self.cancel_all_btn=self._btn('Отменить все', self.cancel_all)
-        self.balance_refresh_btn=self._btn('Обновить балансы', self.refresh_balances)
-        self.log_panel=LogPanel(500); self.log_panel.setMinimumHeight(160); self.log_panel.setMaximumHeight(220); self.logger.subscribe(self.log_panel.append_record)
-        # Keep existing layout simple
-        main.addWidget(self.table); main.addWidget(self.log_panel)
+        self.setFont(QFont('', APP_FONT_PT))
+        root = QWidget()
+        self.setCentralWidget(root)
+        main = QVBoxLayout(root)
+        main.setContentsMargins(10, 10, 10, 10)
+        main.setSpacing(8)
+
+        self.s, self.m, self.b = {}, {}, {}
+
+        top = QGroupBox('Статус системы')
+        top.setMinimumHeight(90)
+        top.setMaximumHeight(110)
+        top_l = QGridLayout(top)
+        status_keys = ['Публичный REST', 'Аккаунт', 'Опрос', 'Приватный канал', 'Торговля', 'Только чтение', 'WS', 'Задержка']
+        for i, k in enumerate(status_keys):
+            top_l.addWidget(QLabel(f'{k}:'), i // 4, (i % 4) * 2)
+            self.s[k] = self._value('-')
+            top_l.addWidget(self.s[k], i // 4, (i % 4) * 2 + 1)
+        self.settings_btn = self._btn('Настройки', self.open_settings)
+        self.diag_btn = self._btn('Проверить систему', self.run_diagnostics)
+        top_l.addWidget(self.settings_btn, 2, 6)
+        top_l.addWidget(self.diag_btn, 2, 7)
+        main.addWidget(top)
+
+        center_splitter = QSplitter(Qt.Horizontal)
+
+        left_col = QWidget()
+        left_l = QVBoxLayout(left_col)
+
+        market_box = QGroupBox('Рынок')
+        market_f = QFormLayout(market_box)
+        for key in ['Последняя', 'Bid', 'Ask', 'Спред', 'Возраст REST']:
+            self.m[key] = self._value('0.00000000' if key != 'Возраст REST' else '-')
+            market_f.addRow(QLabel(key), self.m[key])
+        market_btns = QHBoxLayout()
+        market_btns.addWidget(self._btn('Обновить', self.refresh_market))
+        market_btns.addWidget(self._btn('Старт опроса', self.start_polling))
+        market_btns.addWidget(self._btn('Стоп опроса', self.stop_polling))
+        market_f.addRow(market_btns)
+
+        spread_box = QGroupBox('Спред')
+        spread_f = QFormLayout(spread_box)
+        for key in ['Спред', 'Тики', 'Lifetime', 'Stable']:
+            self.m[key] = self._value('0.00000000' if key == 'Спред' else '-')
+            spread_f.addRow(QLabel(key), self.m[key])
+
+        balances_box = QGroupBox('Балансы')
+        bal_f = QFormLayout(balances_box)
+        bal_keys = ['USDT свободно', 'USDT заблокировано', 'EURI свободно', 'EURI заблокировано', 'Оценка всего USDT']
+        for key in bal_keys:
+            self.b[key] = self._value('0.00000000')
+            bal_f.addRow(QLabel(key), self.b[key])
+        self.balance_refresh_btn = self._btn('Обновить балансы', self.refresh_balances)
+        bal_f.addRow(self.balance_refresh_btn)
+
+        left_l.addWidget(market_box)
+        left_l.addWidget(spread_box)
+        left_l.addWidget(balances_box)
+        left_l.addStretch(1)
+
+        center_col = QWidget()
+        center_l = QVBoxLayout(center_col)
+        orders_box = QGroupBox('Открытые ордера')
+        orders_l = QVBoxLayout(orders_box)
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(['ID', 'Сторона', 'Цена', 'Количество', 'Исполнено', 'Исполнено %', 'Статус', 'Возраст'])
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(TABLE_ROW_H)
+        self.table.horizontalHeader().setFixedHeight(TABLE_HEADER_H)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        for i, w in OPEN_ORDERS_COL_WIDTHS.items():
+            self.table.setColumnWidth(i, w)
+        orders_l.addWidget(self.table)
+        order_btns = QHBoxLayout()
+        self.refresh_orders_btn = self._btn('Обновить', self.refresh_orders)
+        self.cancel_btn = self._btn('Отменить выбранный', self.cancel_selected)
+        self.cancel_all_btn = self._btn('Отменить все', self.cancel_all)
+        order_btns.addWidget(self.refresh_orders_btn)
+        order_btns.addWidget(self.cancel_btn)
+        order_btns.addWidget(self.cancel_all_btn)
+        order_btns.addStretch(1)
+        orders_l.addLayout(order_btns)
+        center_l.addWidget(orders_box)
+
+        right_col = QWidget()
+        right_l = QVBoxLayout(right_col)
+
+        manual_box = QGroupBox('Ручная торговля')
+        manual_f = QFormLayout(manual_box)
+        self.side = QComboBox(); self.side.addItems(['BUY', 'SELL'])
+        self.price = QLineEdit(); self.qty = QLineEdit(); self.total = self._value('0.00000000')
+        manual_f.addRow('Сторона', self.side)
+        manual_f.addRow('Цена', self.price)
+        manual_f.addRow('Количество', self.qty)
+        manual_f.addRow('Сумма', self.total)
+        self.buy_btn = self._btn('Купить LIMIT', lambda: self.place('BUY'))
+        self.sell_btn = self._btn('Продать LIMIT', lambda: self.place('SELL'))
+        trade_btns = QHBoxLayout(); trade_btns.addWidget(self.buy_btn); trade_btns.addWidget(self.sell_btn)
+        manual_f.addRow(trade_btns)
+
+        activity_box = QGroupBox('Активность ордера')
+        act_f = QFormLayout(activity_box)
+        for key in ['Активный ордер', 'Время жизни', 'Очередь', 'Reprice count']:
+            self.s[key] = self._value('-')
+            act_f.addRow(QLabel(key), self.s[key])
+
+        fsm_box = QGroupBox('Runtime FSM')
+        fsm_f = QFormLayout(fsm_box)
+        self.s['State'] = self._value('-')
+        fsm_f.addRow(QLabel('State'), self.s['State'])
+
+        right_l.addWidget(manual_box)
+        right_l.addWidget(activity_box)
+        right_l.addWidget(fsm_box)
+        right_l.addStretch(1)
+
+        center_splitter.addWidget(left_col)
+        center_splitter.addWidget(center_col)
+        center_splitter.addWidget(right_col)
+        center_splitter.setStretchFactor(0, 0)
+        center_splitter.setStretchFactor(1, 1)
+        center_splitter.setStretchFactor(2, 0)
+        center_splitter.setSizes([400, 760, 340])
+        left_col.setMinimumWidth(360)
+        left_col.setMaximumWidth(420)
+        right_col.setMinimumWidth(320)
+        right_col.setMaximumWidth(360)
+        main.addWidget(center_splitter, 1)
+
+        logs_box = QGroupBox('Логи')
+        logs_box.setMinimumHeight(160)
+        logs_box.setMaximumHeight(220)
+        logs_l = QVBoxLayout(logs_box)
+        self.log_panel = LogPanel(500)
+        self.logger.subscribe(self.log_panel.append_record)
+        self.clear_logs_btn = self._btn('Очистить логи', self.log_panel.clear)
+        logs_l.addWidget(self.log_panel)
+        logs_l.addWidget(self.clear_logs_btn)
+        main.addWidget(logs_box)
 
     def open_settings(self):
         self.settings_dialog = SettingsDialog(self.cfg, self.apply_settings, self.test_connection, self)
@@ -106,8 +274,7 @@ class MainWindow(QMainWindow):
 
     def _load_filters_if_needed(self):
         if self.filters is None:
-            info = self.client.get_exchange_info(self.cfg['symbol'])
-            self.filters = info
+            self.filters = self.client.get_exchange_info(self.cfg['symbol'])
 
     def _set_private_polling(self, enabled: bool):
         self.polling.set_private_enabled(enabled and self.runtime.account_auth_state == 'CONNECTED')
@@ -117,64 +284,102 @@ class MainWindow(QMainWindow):
         self.task_runner.run_task('market', lambda: self.market.snapshot())
 
     def refresh_balances(self):
-        if self.runtime.account_auth_state != 'CONNECTED': return
+        if self.runtime.account_auth_state != 'CONNECTED':
+            return
         self.task_runner.run_task('balances', self.account.balances)
 
     def refresh_orders(self):
-        if self.runtime.account_auth_state != 'CONNECTED': return
+        if self.runtime.account_auth_state != 'CONNECTED':
+            return
         self.task_runner.run_task('orders', self.orders.open_orders)
 
     def _on_task_success(self, name, payload):
         if name == 'market':
-            s=payload
-            self.m.update({'Последняя':QLabel(str(s['last']))})
+            s = payload
+            self.m['Последняя'].setText(str(s.get('last', '0.00000000')))
+            self.m['Bid'].setText(str(s.get('bid', '0.00000000')))
+            self.m['Ask'].setText(str(s.get('ask', '0.00000000')))
+            self.m['Спред'].setText(str(s.get('spread', '0.00000000')))
+            self.m['Возраст REST'].setText(str(s.get('rest_age', '-')))
         elif name == 'balances':
+            bal = payload
+            self.b['USDT свободно'].setText(str(bal.get('USDT_free', '0.00000000')))
+            self.b['USDT заблокировано'].setText(str(bal.get('USDT_locked', '0.00000000')))
+            self.b['EURI свободно'].setText(str(bal.get('EURI_free', '0.00000000')))
+            self.b['EURI заблокировано'].setText(str(bal.get('EURI_locked', '0.00000000')))
+            self.b['Оценка всего USDT'].setText(str(bal.get('equity_usdt', '0.00000000')))
             self.runtime.mark_balances_update()
         elif name == 'orders':
-            data = payload; self.table.setRowCount(len(data)); now_ms=int(time.time()*1000)
-            for r,o in enumerate(data):
-                filled=((float(o.get('executedQty',0))/max(float(o.get('origQty',0) or 1),1e-9))*100); age=format_age_ms(max(0, now_ms-int(o.get('time', now_ms))))
-                vals=[o.get('orderId'),o.get('side'),o.get('price'),o.get('origQty'),o.get('executedQty'),f'{filled:.1f}%',o.get('status'),age]
-                for c,v in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(v)))
+            data = payload
+            self.table.setRowCount(len(data))
+            now_ms = int(time.time() * 1000)
+            for r, o in enumerate(data):
+                filled = (float(o.get('executedQty', 0)) / max(float(o.get('origQty', 0) or 1), 1e-9)) * 100
+                age = format_age_ms(max(0, now_ms - int(o.get('time', now_ms))))
+                vals = [o.get('orderId'), o.get('side'), o.get('price'), o.get('origQty'), o.get('executedQty'), f'{filled:.1f}%', o.get('status'), age]
+                for c, v in enumerate(vals):
+                    self.table.setItem(r, c, QTableWidgetItem(str(v)))
 
     def _on_task_error(self, name, err):
         self.logger.log('ОШИБКА', f'{name}: {err}')
 
     def place(self, side):
-        if self.runtime.account_auth_state != 'CONNECTED': return self.logger.log('РИСК', 'Торговля недоступна: аккаунт не подключен')
-        if self.cfg.get('read_only', True): return self.logger.log('РИСК', 'Торговля запрещена: включен режим только чтение')
-        if not self.cfg.get('trading_enabled', False): return self.logger.log('РИСК', 'Торговля отключена в настройках')
-        price=self.price.text().strip(); qty=self.qty.text().strip()
-        if not price or not qty: return self.logger.log('РИСК', 'Заполните цену и количество')
+        if self.runtime.account_auth_state != 'CONNECTED':
+            return self.logger.log('РИСК', 'Торговля недоступна: аккаунт не подключен')
+        if self.cfg.get('read_only', True):
+            return self.logger.log('РИСК', 'Торговля запрещена: включен режим только чтение')
+        if not self.cfg.get('trading_enabled', False):
+            return self.logger.log('РИСК', 'Торговля отключена в настройках')
+        price = self.price.text().strip(); qty = self.qty.text().strip()
+        if not price or not qty:
+            return self.logger.log('РИСК', 'Заполните цену и количество')
         self._load_filters_if_needed()
-        ok,msg=validate_order(side, price, qty, self.filters)
-        if not ok: return self.logger.log('ОШИБКА', msg)
-        if QMessageBox.question(self, 'Подтверждение ордера', f'Отправить {side} LIMIT {qty} по {price}?') != QMessageBox.Yes: return
+        ok, msg = validate_order(side, price, qty, self.filters)
+        if not ok:
+            return self.logger.log('ОШИБКА', msg)
+        if QMessageBox.question(self, 'Подтверждение ордера', f'Отправить {side} LIMIT {qty} по {price}?') != QMessageBox.Yes:
+            return
         self.task_runner.run_task('place_order', lambda: self.orders.place_limit(side, qty, price))
 
     def cancel_selected(self):
-        row=self.table.currentRow()
-        if row < 0: return QMessageBox.warning(self, 'Внимание', 'Выберите ордер для отмены')
-        item=self.table.item(row,0)
-        if not item: return QMessageBox.warning(self, 'Внимание', 'orderId не найден')
-        oid=int(item.text())
-        if QMessageBox.question(self, 'Подтверждение', f'Отменить ордер {oid}?') != QMessageBox.Yes: return
+        row = self.table.currentRow()
+        if row < 0:
+            return QMessageBox.warning(self, 'Внимание', 'Выберите ордер для отмены')
+        item = self.table.item(row, 0)
+        if not item:
+            return QMessageBox.warning(self, 'Внимание', 'orderId не найден')
+        oid = int(item.text())
+        if QMessageBox.question(self, 'Подтверждение', f'Отменить ордер {oid}?') != QMessageBox.Yes:
+            return
         self.task_runner.run_task('cancel_order', lambda: self.orders.cancel(oid))
 
     def cancel_all(self):
-        if QMessageBox.question(self, 'Подтверждение', 'Отменить все открытые ордера?') != QMessageBox.Yes: return
+        if QMessageBox.question(self, 'Подтверждение', 'Отменить все открытые ордера?') != QMessageBox.Yes:
+            return
         self.task_runner.run_task('cancel_order', self.orders.cancel_all)
 
     def run_diagnostics(self):
         self.logger.log('ИНФО', f'diag in_flight={len(self.task_runner.in_flight)} polling={self.polling.running} private={self.polling.private_enabled}')
 
     def _tick_status(self):
+        self.s['Публичный REST'].setText('OK')
         self.s['Аккаунт'].setText(self.runtime.account_auth_state)
+        self.s['Опрос'].setText('RUNNING' if self.polling.running else 'STOPPED')
+        self.s['Приватный канал'].setText(self.runtime.private_polling_state)
+        self.s['Торговля'].setText('ON' if self.cfg.get('trading_enabled', False) else 'OFF')
+        self.s['Только чтение'].setText('ON' if self.cfg.get('read_only', True) else 'OFF')
+        self.s['WS'].setText('ON' if self.ws.enabled else 'OFF')
+        self.s['Задержка'].setText(self.runtime.last_public_latency_ms or '0ms')
 
     def start_polling(self):
-        if self.polling.start(): self.runtime.set_polling(True); self.logger.log('ИНФО','Опрос запущен')
+        if self.polling.start():
+            self.runtime.set_polling(True)
+            self.logger.log('ИНФО', 'Опрос запущен')
+
     def stop_polling(self):
-        self.polling.stop(); self.runtime.set_polling(False); self.logger.log('ИНФО','Опрос остановлен')
+        self.polling.stop()
+        self.runtime.set_polling(False)
+        self.logger.log('ИНФО', 'Опрос остановлен')
 
 
 def run():
