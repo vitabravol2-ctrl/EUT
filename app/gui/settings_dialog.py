@@ -64,3 +64,5 @@ class SettingsDialog(QDialog):
         self.status.setText(message)
         if ok:
             self._on_save(self.values())
+        else:
+            QMessageBox.warning(self, 'Connection Failed', 'Binance account connection failed.\n\nCheck:\n\n• API key/secret\n• Spot permissions\n• IP whitelist\n• Testnet OFF for real Binance\n• Testnet ON only for testnet keys')
