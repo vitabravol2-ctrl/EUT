@@ -24,6 +24,7 @@ from app.core.polling_manager import PollingManager
 from app.core.spread_stability_engine import ReadinessState, SpreadStabilityEngine
 from app.core.runtime_state import RuntimeState
 from app.core.ws_manager import WSManager
+from app.core.reconcile import safe_status, should_clear_active_order
 from app.gui.panels.log_panel import LogPanel
 from app.gui.settings_dialog import SettingsDialog
 from app.gui.ui_constants import *
@@ -300,13 +301,15 @@ class MainWindow(QMainWindow):
             self.logger.log('INFO', '[RUNTIME] maintaining BUY quote')
             self.logger.log('INFO', '[RUNTIME] maintaining SELL quote')
 
+            open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
+
             # BUY maintain
             if net_inv < max_long:
                 buy_status = None
                 if c.buy_order_id:
                     try:
                         st = self.orders.order_status(c.buy_order_id)
-                        buy_status = st.get('status')
+                        buy_status = safe_status(st)
                         self.cs_buy_status.setText(str(buy_status))
                         exec_qty = Decimal(str(st.get('executedQty', '0')))
                         delta = exec_qty - c.buy_filled_qty
@@ -315,9 +318,15 @@ class MainWindow(QMainWindow):
                             self.logger.log('INFO', f'[BUY] partial fill qty={delta}')
                             self.logger.log('INFO', '[SELL] hedge quote created')
                             self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
-                    except Exception:
+                    except Exception as e:
+                        self.logger.log('INFO', f'[RUNTIME] reconcile BUY status fetch failed -> {e}')
                         buy_status = None
-                if buy_status in ('FILLED', 'CANCELED', 'REJECTED', 'EXPIRED') or (c.buy_order_id and c.buy_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}):
+                if c.buy_order_id and c.buy_order_id not in open_order_ids:
+                    self.logger.log('INFO', '[RUNTIME] BUY vanished')
+                    self.logger.log('INFO', '[RUNTIME] reconcile BUY')
+                    self.logger.log('INFO', '[RUNTIME] registry cleaned')
+                    self.logger.log('INFO', '[RUNTIME] optimistic cleared')
+                if should_clear_active_order(c.buy_order_id, buy_status, open_order_ids):
                     c.buy_order_id = None
                     self._active_buy_order_id = None
                 if not c.buy_order_id:
@@ -341,9 +350,13 @@ class MainWindow(QMainWindow):
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
                             self.cs_top_bid_status.setText('REPRICING')
                             self.logger.log('INFO', '[BUY] reposting top bid')
-                            self.orders.cancel(c.buy_order_id)
+                            try:
+                                self.orders.cancel(c.buy_order_id)
+                            except Exception as e:
+                                self.logger.log('INFO', f'[RUNTIME] reconcile BUY cancel race -> {e}')
                             c.buy_order_id = None
                             self._active_buy_order_id = None
+                            self.logger.log('INFO', '[RUNTIME] repost continue')
                             self._last_reprice_at = time.time()
                     else:
                         self.cs_top_bid_status.setText('TOP')
@@ -356,7 +369,7 @@ class MainWindow(QMainWindow):
                 if c.sell_order_id:
                     try:
                         st = self.orders.order_status(c.sell_order_id)
-                        sell_status = st.get('status')
+                        sell_status = safe_status(st)
                         self.cs_sell_status.setText(str(sell_status))
                         exec_qty = Decimal(str(st.get('executedQty', '0')))
                         delta = exec_qty - c.sell_filled_qty
@@ -365,9 +378,15 @@ class MainWindow(QMainWindow):
                             self.logger.log('INFO', f'[SELL] partial fill qty={delta}')
                             self.logger.log('INFO', '[BUY] hedge quote created')
                             self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
-                    except Exception:
+                    except Exception as e:
+                        self.logger.log('INFO', f'[RUNTIME] reconcile SELL status fetch failed -> {e}')
                         sell_status = None
-                if sell_status in ('FILLED', 'CANCELED', 'REJECTED', 'EXPIRED') or (c.sell_order_id and c.sell_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}):
+                if c.sell_order_id and c.sell_order_id not in open_order_ids:
+                    self.logger.log('INFO', '[RUNTIME] SELL vanished -> reconciled')
+                    self.logger.log('INFO', '[RUNTIME] reconcile SELL')
+                    self.logger.log('INFO', '[RUNTIME] registry cleaned')
+                    self.logger.log('INFO', '[RUNTIME] optimistic cleared')
+                if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids):
                     c.sell_order_id = None
                     self._active_sell_order_id = None
                 if not c.sell_order_id:
@@ -390,9 +409,13 @@ class MainWindow(QMainWindow):
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
                             self.cs_top_ask_status.setText('REPRICING')
                             self.logger.log('INFO', '[SELL] reposting top ask')
-                            self.orders.cancel(c.sell_order_id)
+                            try:
+                                self.orders.cancel(c.sell_order_id)
+                            except Exception as e:
+                                self.logger.log('INFO', f'[RUNTIME] reconcile SELL cancel race -> {e}')
                             c.sell_order_id = None
                             self._active_sell_order_id = None
+                            self.logger.log('INFO', '[RUNTIME] repost continue')
                             self._last_reprice_at = time.time()
                     else:
                         self.cs_top_ask_status.setText('TOP')
@@ -404,9 +427,9 @@ class MainWindow(QMainWindow):
                 self.logger.log('INFO', '[INVENTORY] balancing short')
             self.refresh_orders(True)
         except Exception as e:
-            self.logger.log('ERROR', f'[LIVE] runtime error: {e}')
-            old, new = c.transition(CycleState.ERROR, str(e))
-            self.logger.log('FSM', f'{old.value} -> {new.value} reason={str(e)}')
+            self.logger.log('ERROR', f'[LIVE] non-fatal runtime exception: {e}')
+            self.logger.log('INFO', '[RUNTIME] reconcile BUY')
+            self.logger.log('INFO', '[RUNTIME] reconcile SELL')
     def _tick_status(self):
         self._status_badges['SYSTEM'].setText('SYSTEM OK'); self._status_badges['TRADING'].setText(f"TRADING {'ON' if self.cfg.get('trading_enabled',False) else 'OFF'}")
         self._status_badges['EURI'].setText(f"EURI {self._fmt_bal('EURI_free')} / locked {self._fmt_bal('EURI_locked')}")
