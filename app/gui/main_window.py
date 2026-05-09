@@ -273,184 +273,140 @@ class MainWindow(QMainWindow):
 
     def _run_live_cycle(self):
         c = self._cycle
-        if not self._live_running and c.state not in (CycleState.EXIT_PENDING, CycleState.SELL_WORKING, CycleState.SELL_PARTIAL):
+        if not self._live_running:
             return
         try:
+            if c.state != CycleState.WAIT_READY:
+                old, new = c.transition(CycleState.WAIT_READY, 'continuous runtime')
+                self.logger.log('FSM', f'{old.value} -> {new.value} reason=continuous runtime')
+            ok, reason = self._risk_ok()
+            if not ok:
+                now = time.time()
+                if now - self._last_wait_log_at >= 7:
+                    self.logger.log('INFO', f'[LIVE] waiting: {reason}')
+                    self._last_wait_log_at = now
+                return
             bid = Decimal(str(self._last_market_snapshot.get('bid', '0')))
             ask = Decimal(str(self._last_market_snapshot.get('ask', '0')))
-            if c.state == CycleState.WAIT_READY and self._live_running:
-                ok, reason = self._risk_ok()
-                if ok:
-                    self.logger.log('INFO', '[RUNTIME] sticky harvest mode active')
-                    old, new = c.transition(CycleState.PLACE_BUY, 'ready'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=ready')
+            if bid <= 0 or ask <= 0 or ask <= bid:
+                return
+            if not self._require_exchange_filters():
+                return
+            tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001')))
+            step = Decimal(str(self._exchange_filters.get('stepSize', '0.0001')))
+            max_long = Decimal(str(self.cfg.get('max_long_inventory_euri', 500)))
+            max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
+            net_inv = c.net_inventory_euri
+            self.logger.log('INFO', '[RUNTIME] maintaining BUY quote')
+            self.logger.log('INFO', '[RUNTIME] maintaining SELL quote')
+
+            # BUY maintain
+            if net_inv < max_long:
+                buy_status = None
+                if c.buy_order_id:
+                    try:
+                        st = self.orders.order_status(c.buy_order_id)
+                        buy_status = st.get('status')
+                        self.cs_buy_status.setText(str(buy_status))
+                        exec_qty = Decimal(str(st.get('executedQty', '0')))
+                        delta = exec_qty - c.buy_filled_qty
+                        if delta > 0:
+                            c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
+                            self.logger.log('INFO', f'[BUY] partial fill qty={delta}')
+                            self.logger.log('INFO', '[SELL] hedge quote created')
+                            self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
+                    except Exception:
+                        buy_status = None
+                if buy_status in ('FILLED', 'CANCELED', 'REJECTED', 'EXPIRED') or (c.buy_order_id and c.buy_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}):
+                    c.buy_order_id = None
+                    self._active_buy_order_id = None
+                if not c.buy_order_id:
+                    quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
+                    qty_n = floor_to_step(quote / bid, step) if bid > 0 else Decimal('0')
+                    if qty_n > 0:
+                        price = floor_to_tick(bid, tick)
+                        resp = self.orders.place_limit_maker('BUY', format_decimal_for_step(qty_n, step), format_decimal_for_tick(price, tick))
+                        c.buy_order_id = int(resp.get('orderId'))
+                        c.buy_requested_qty = qty_n
+                        c.target_qty = qty_n
+                        self._active_buy_order_id = c.buy_order_id
+                        self._buy_started_at = time.time()
+                        self.cs_top_bid_status.setText('WORKING')
                 else:
-                    now = __import__('time').time()
-                    if now - self._last_wait_log_at >= 7:
-                        self.logger.log('INFO', f'[LIVE] waiting: {reason}')
-                        self._last_wait_log_at = now
-            if c.state == CycleState.PLACE_BUY:
-                if c.net_inventory_euri >= Decimal(str(self.cfg.get('max_long_inventory_euri', 500))):
-                    self.logger.log('RISK', '[INVENTORY] long limit reached')
-                    return
-                if self.has_active_buy() or c.state in (CycleState.BUY_WORKING, CycleState.CANCEL_BUY):
-                    self.logger.log('INFO','[RUNTIME] active BUY exists'); self.logger.log('INFO','[RUNTIME] skip duplicate BUY')
-                    return
-                quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
-                raw_qty = quote / bid if bid > 0 else Decimal('0')
-                if Decimal(str(self.cfg.get('max_position_euri', 0))) > 0 and raw_qty > Decimal(str(self.cfg.get('max_position_euri', 0))):
-                    self.logger.log('RISK', '[RISK] blocked reason=max position EURI')
-                    c.transition(CycleState.ERROR, 'max position'); return
-                if not self._require_exchange_filters():
-                    self.logger.log('RISK', '[RISK] blocked: exchange filters missing')
-                    c.transition(CycleState.ERROR, 'exchange filters missing'); return
-                info = self._exchange_filters
-                tick = Decimal(str(info.get('tickSize')))
-                step = Decimal(str(info.get('stepSize')))
-                price = floor_to_tick(bid, tick)
-                qty_n = floor_to_step(raw_qty, step)
-                api_price = format_decimal_for_tick(price, tick)
-                api_qty = format_decimal_for_step(qty_n, step)
-                notional = qty_n * price
-                self.logger.log('INFO', f'[BUY] raw_qty={raw_qty}')
-                self.logger.log('INFO', f'[BUY] normalized_qty={qty_n}')
-                self.logger.log('INFO', f"[BUY] filters tickSize={info.get('tickSize')}")
-                self.logger.log('INFO', f"[BUY] filters stepSize={info.get('stepSize')}")
-                self.logger.log('INFO', f'[BUY] notional={notional}')
-                if qty_n <= 0 or qty_n < Decimal(str(info.get('minQty', '0'))):
-                    self.logger.log('RISK', '[RISK] blocked: qty below minQty after step rounding')
-                    c.transition(CycleState.ERROR, 'qty below minQty')
-                    return
-                if notional > Decimal(str(self._balances.get('USDT_free', 0))):
-                    self.logger.log('RISK', '[RISK] blocked: USDT balance too low')
-                    c.transition(CycleState.ERROR, 'insufficient balance')
-                    return
-                ok,msg=validate_order(api_price, api_qty, tick_size=info['tickSize'], step_size=info['stepSize'], min_qty=info['minQty'], min_notional=info['minNotional'])
-                if not ok: self.logger.log('ERROR', f'[BUY] rejected reason={msg}'); c.transition(CycleState.ERROR, msg); return
-                qty_aligned = 'YES' if Decimal(api_qty) == floor_to_step(Decimal(api_qty), step) else 'NO'
-                price_aligned = 'YES' if Decimal(api_price) == floor_to_tick(Decimal(api_price), tick) else 'NO'
-                self.logger.log('INFO', f"[BUY] api_qty='{api_qty}'")
-                self.logger.log('INFO', f"[BUY] api_price='{api_price}'")
-                self.logger.log('INFO', f'[BUY] qty_aligned={qty_aligned}')
-                self.logger.log('INFO', f'[BUY] price_aligned={price_aligned}')
-                if qty_aligned == 'NO':
-                    self.logger.log('ERROR', '[BUY] rejected reason=qty not aligned to stepSize')
-                    c.transition(CycleState.ERROR, 'qty not aligned to stepSize')
-                    return
-                self.logger.log('INFO', f"[BUY] final payload quantity='{api_qty}'")
-                self.logger.log('INFO', f"[BUY] final payload price='{api_price}'")
-                self.logger.log('INFO', '[BUY] final payload type=LIMIT_MAKER')
-                resp = self.orders.place_limit_maker('BUY', str(api_qty), str(api_price)); self.refresh_orders(True)
-                c.buy_order_id = int(resp.get('orderId')); self._active_buy_order_id = c.buy_order_id; c.buy_requested_qty = qty_n; c.target_qty = qty_n; self._buy_started_at = __import__('time').time(); self.cs_buy_status.setText('NEW'); self.cs_top_bid_status.setText('TOP'); self.logger.log('INFO', '[BUY] top bid acquired')
-                old,new=c.transition(CycleState.BUY_WORKING, 'buy accepted'); self.logger.log('INFO', f"[BUY] accepted id={c.buy_order_id}"); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy accepted')
-            if c.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and c.buy_order_id:
-                st=self.orders.order_status(c.buy_order_id); status=st.get('status'); exec_qty=Decimal(str(st.get('executedQty','0'))); px=Decimal(str(st.get('price') or bid or '0'))
-                self.cs_buy_status.setText(str(status))
-                delta=exec_qty-c.buy_filled_qty
-                if delta>0: c.apply_buy_fill(delta, px); self._last_fill_time=time.strftime('%H:%M:%S', time.gmtime()); self.logger.log('INFO', f'[BUY] partial fill qty={delta}'); self.logger.log('INFO', '[SELL] hedge quote created'); self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}'); self.refresh_orders(True); old,new=c.transition(CycleState.PLACE_SELL,'buy partial'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy partial')
-                working_buy_price = Decimal(str(st.get('price') or c.buy_avg_price or '0'))
-                spread_ready = self._spread_metrics and self._spread_metrics.state.readiness == ReadinessState.READY
-                spread_ticks = self._spread_metrics.snapshot.spread_ticks if self._spread_metrics else Decimal('0')
-                if status in ('NEW', 'PARTIALLY_FILLED'):
-                    if self.cfg.get('cancel_on_spread_collapse', True) and spread_ticks < Decimal(int(self.cfg.get('min_spread_ticks',2))) and c.buy_filled_qty <= 0:
-                        self.orders.cancel(c.buy_order_id); self.refresh_orders(True); self.logger.log('INFO','[SPREAD] collapse confirmed')
-                        old,new=c.transition(CycleState.CANCEL_BUY,'spread collapse'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=spread collapse')
-                        return
-                    if self.cfg.get('reprice_on_move', True) and bid > working_buy_price and spread_ready and (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
-                        self.cs_top_bid_status.setText('OUTBID'); self.logger.log('INFO','[BUY] outbid'); self.logger.log('INFO','[BUY] reposting'); self.logger.log('INFO',f'[REPRICE] BUY moved away old={working_buy_price} new={bid}'); self.logger.log('INFO','[BUY] cancel requested')
-                        self._last_reprice_at = time.time()
-                        self.orders.cancel(c.buy_order_id); self.refresh_orders(True); self.logger.log('INFO','[BUY] canceled')
-                        old,new=c.transition(CycleState.CANCEL_BUY,'reprice'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=reprice')
-                        return
-                ttl=int(self.cfg.get('entry_order_ttl_sec',30))
-                now=__import__('time').time()
-                if status=='FILLED': old,new=c.transition(CycleState.BUY_FILLED,'buy filled'); self.logger.log('INFO','[BUY] filled'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy filled')
-                elif now-self._buy_started_at>ttl:
-                    self.orders.cancel(c.buy_order_id); self.refresh_orders(True); self.logger.log('INFO','[BUY] cancelled ttl')
-                    old,new=c.transition(CycleState.CANCEL_BUY,'buy ttl'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=buy ttl')
-            if c.state == CycleState.CANCEL_BUY and c.buy_order_id:
-                status='UNKNOWN'
-                try: status=self.orders.order_status(c.buy_order_id).get('status','UNKNOWN')
-                except Exception: pass
-                open_ids={int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
-                if c.buy_order_id not in open_ids or status == 'CANCELED':
-                    self._active_buy_order_id=None; c.buy_order_id=None; self.cs_buy_status.setText(status); self.cs_top_bid_status.setText('REPRICING')
-                    next_state = c.next_state_after_buy_cancel()
-                    reason = 'buy canceled no fill' if next_state == CycleState.WAIT_READY else 'buy canceled partial fill'
-                    old,new=c.transition(next_state,reason); self.logger.log('FSM', f'{old.value} -> {new.value} reason={reason}')
-            if c.state == CycleState.BUY_FILLED: c.transition(CycleState.PLACE_SELL, 'sell next')
-            if c.state == CycleState.PLACE_SELL:
-                if c.net_inventory_euri <= Decimal(str(self.cfg.get('max_short_inventory_euri', -500))):
-                    self.logger.log('RISK', '[INVENTORY] short limit reached')
-                    return
-                if not c.can_place_sell():
-                    self.logger.log('RISK', '[RISK] blocked: no position to sell')
-                    old,new=c.transition(CycleState.WAIT_READY, 'no position to sell')
-                    self.logger.log('FSM', f'{old.value} -> {new.value} reason=no position to sell')
-                    return
-                sell_qty = c.open_position_qty
-                if sell_qty <= 0: c.transition(CycleState.ERROR, 'sell qty invalid'); return
-                price = ask
-                min_sell = c.buy_avg_price + Decimal(str(self._exchange_filters.get('tickSize', '0.0001')))
-                price = max(ask, min_sell)
-                self.logger.log('INFO', f'[SELL] placing maker price=current_best_ask qty={sell_qty}')
-                resp = self.orders.place_limit_maker('SELL', str(sell_qty), str(price)); self.refresh_orders(True)
-                c.sell_order_id = int(resp.get('orderId')); self._active_sell_order_id = c.sell_order_id; c.sell_requested_qty = sell_qty; self._sell_started_at = __import__('time').time(); self.cs_sell_status.setText('NEW')
-                self.cs_top_ask_status.setText('TOP'); self.logger.log('INFO', '[SELL] top ask acquired')
-                self._pending_sell_grace_until = self._sell_started_at + 2.0
-                self._pending_sell_order = {'orderId': c.sell_order_id, 'side': 'SELL', 'price': str(price), 'origQty': str(sell_qty), 'executedQty': '0', 'status': 'NEW', 'time': int(self._sell_started_at * 1000)}
-                self.refresh_orders(True)
-                old,new=c.transition(CycleState.SELL_WORKING,'sell accepted'); self.logger.log('INFO', f'[SELL] accepted id={c.sell_order_id}'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell accepted')
-            if c.state in (CycleState.SELL_WORKING, CycleState.SELL_PARTIAL, CycleState.EXIT_PENDING) and c.sell_order_id:
-                st=self.orders.order_status(c.sell_order_id); status=st.get('status'); exec_qty=Decimal(str(st.get('executedQty','0'))); px=Decimal(str(st.get('price') or ask or '0'))
-                self.cs_sell_status.setText(str(status))
-                self.logger.log('INFO', f"[ORDERS] SELL working id={c.sell_order_id} status={status}")
-                if self._pending_sell_order:
-                    self._pending_sell_order.update({'executedQty': str(exec_qty), 'status': str(status), 'price': str(st.get('price') or self._pending_sell_order.get('price'))})
-                delta=exec_qty-c.sell_filled_qty
-                if delta>0: c.apply_sell_fill(delta, px); self._last_fill_time=time.strftime('%H:%M:%S', time.gmtime()); self.logger.log('INFO', f'[SELL] partial fill qty={delta}'); self.logger.log('INFO', '[BUY] hedge quote created'); self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}'); self.refresh_orders(True); old,new=c.transition(CycleState.PLACE_BUY,'sell partial hedge'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell partial hedge')
-                if status == 'FILLED':
-                    self._active_sell_order_id=None; self._pending_sell_order=None
-                    old,new=c.transition(CycleState.PROFIT_LOCKED,'sell filled'); self.logger.log('INFO','[SELL] filled'); self.logger.log('INFO', f'[PNL] realized={c.realized_pnl}'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell filled')
-                    return
-                if status == 'CANCELED':
-                    self._active_sell_order_id=None; self._pending_sell_order=None
-                    next_state = CycleState.EXIT_PENDING if c.open_position_qty > 0 else CycleState.PLACE_SELL
-                    old,new=c.transition(next_state,'sell canceled'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell canceled')
-                    return
-                working_sell_price = Decimal(str(st.get('price') or c.sell_avg_price or '0'))
-                if status in ('NEW', 'PARTIALLY_FILLED') and self.cfg.get('reprice_on_move', True) and ask > 0 and ask != working_sell_price and ask > c.buy_avg_price and (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
-                    self.cs_top_ask_status.setText('UNDERCUT'); self.logger.log('INFO','[SELL] undercut'); self.logger.log('INFO','[SELL] reposting')
-                    self.logger.log('INFO', f'[REPRICE] SELL moved away old={working_sell_price} new={ask}')
-                    self._last_reprice_at = time.time()
-                    self.cs_top_ask_status.setText('REPRICING')
-                    self.logger.log('INFO','[SELL] cancel requested reprice')
-                    self.orders.cancel(c.sell_order_id); self.refresh_orders(True); self.logger.log('INFO','[SELL] canceled')
-                    old,new=c.transition(CycleState.CANCEL_SELL,'sell reprice'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell reprice')
-                    return
-            if c.state == CycleState.CANCEL_SELL and c.sell_order_id:
-                open_ids={int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
-                if c.sell_order_id not in open_ids:
-                    self._active_sell_order_id=None; self._pending_sell_order=None; c.sell_order_id=None
-                    old,new=c.transition(CycleState.PLACE_SELL,'sell reprice confirmed'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell reprice confirmed')
-                if status=='FILLED':
-                    old,new=c.transition(CycleState.PROFIT_LOCKED,'sell filled'); self.logger.log('INFO','[SELL] filled'); self.logger.log('INFO', f'[PNL] realized={c.realized_pnl}'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=sell filled')
-            if c.state == CycleState.PROFIT_LOCKED:
-                self.logger.log('INFO', f'[CYCLE] harvest completed pnl={c.realized_pnl}')
-                c.reset_cycle_accounting()
-                self._active_buy_order_id=None; self._active_sell_order_id=None; self._pending_sell_order=None
-                self.cs_buy_status.setText('-'); self.cs_sell_status.setText('-')
-                self.cs_top_bid_status.setText('-'); self.cs_top_ask_status.setText('-')
-                self.logger.log('INFO', '[CYCLE] reset')
-                if self._live_running:
-                    self.logger.log('INFO', '[RUNTIME] continuous harvest active')
-                    self._cycle_started_at=time.time(); old,new=c.transition(CycleState.WAIT_READY,'cycle done'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done')
+                    ob = self._orders_by_id.get(c.buy_order_id, {})
+                    working_price = Decimal(str(ob.get('price') or bid))
+                    if bid > working_price:
+                        self.cs_top_bid_status.setText('OUTBID')
+                        self.logger.log('INFO', '[BUY] outbid detected')
+                        if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
+                            self.cs_top_bid_status.setText('REPRICING')
+                            self.logger.log('INFO', '[BUY] reposting top bid')
+                            self.orders.cancel(c.buy_order_id)
+                            c.buy_order_id = None
+                            self._active_buy_order_id = None
+                            self._last_reprice_at = time.time()
+                    else:
+                        self.cs_top_bid_status.setText('TOP')
+                        self.logger.log('INFO', '[BUY] top maintained')
+
+            # SELL maintain
+            net_inv = c.net_inventory_euri
+            if net_inv > max_short:
+                sell_status = None
+                if c.sell_order_id:
+                    try:
+                        st = self.orders.order_status(c.sell_order_id)
+                        sell_status = st.get('status')
+                        self.cs_sell_status.setText(str(sell_status))
+                        exec_qty = Decimal(str(st.get('executedQty', '0')))
+                        delta = exec_qty - c.sell_filled_qty
+                        if delta > 0:
+                            c.apply_sell_fill(delta, Decimal(str(st.get('price') or ask)))
+                            self.logger.log('INFO', f'[SELL] partial fill qty={delta}')
+                            self.logger.log('INFO', '[BUY] hedge quote created')
+                            self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
+                    except Exception:
+                        sell_status = None
+                if sell_status in ('FILLED', 'CANCELED', 'REJECTED', 'EXPIRED') or (c.sell_order_id and c.sell_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}):
+                    c.sell_order_id = None
+                    self._active_sell_order_id = None
+                if not c.sell_order_id:
+                    sell_qty = floor_to_step(max(Decimal('0'), c.buy_filled_qty - c.sell_filled_qty), step)
+                    if sell_qty > 0:
+                        min_sell = c.buy_avg_price + tick if c.buy_avg_price > 0 else ask
+                        price = floor_to_tick(max(ask, min_sell), tick)
+                        resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
+                        c.sell_order_id = int(resp.get('orderId'))
+                        c.sell_requested_qty = sell_qty
+                        self._active_sell_order_id = c.sell_order_id
+                        self._sell_started_at = time.time()
+                        self.cs_top_ask_status.setText('WORKING')
                 else:
-                    self._cycle_started_at=time.time(); old,new=c.transition(CycleState.IDLE,'cycle done stopped'); self.logger.log('FSM', f'{old.value} -> {new.value} reason=cycle done stopped')
+                    os = self._orders_by_id.get(c.sell_order_id, {})
+                    working_price = Decimal(str(os.get('price') or ask))
+                    if ask != working_price and ask > 0:
+                        self.cs_top_ask_status.setText('UNDERCUT')
+                        self.logger.log('INFO', '[SELL] undercut detected')
+                        if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
+                            self.cs_top_ask_status.setText('REPRICING')
+                            self.logger.log('INFO', '[SELL] reposting top ask')
+                            self.orders.cancel(c.sell_order_id)
+                            c.sell_order_id = None
+                            self._active_sell_order_id = None
+                            self._last_reprice_at = time.time()
+                    else:
+                        self.cs_top_ask_status.setText('TOP')
+                        self.logger.log('INFO', '[SELL] top maintained')
+
+            if c.net_inventory_euri > Decimal('0'):
+                self.logger.log('INFO', '[INVENTORY] balancing long')
+            elif c.net_inventory_euri < Decimal('0'):
+                self.logger.log('INFO', '[INVENTORY] balancing short')
+            self.refresh_orders(True)
         except Exception as e:
             self.logger.log('ERROR', f'[LIVE] runtime error: {e}')
-            if hasattr(e, 'code') or hasattr(e, 'message'):
-                self.logger.log('ERROR', f"[BUY] Binance reject code={getattr(e, 'code', 'n/a')} message={getattr(e, 'message', str(e))}")
-            old,new=c.transition(CycleState.ERROR, str(e)); self.logger.log('FSM', f'{old.value} -> {new.value} reason={str(e)}')
+            old, new = c.transition(CycleState.ERROR, str(e))
+            self.logger.log('FSM', f'{old.value} -> {new.value} reason={str(e)}')
     def _tick_status(self):
         self._status_badges['SYSTEM'].setText('SYSTEM OK'); self._status_badges['TRADING'].setText(f"TRADING {'ON' if self.cfg.get('trading_enabled',False) else 'OFF'}")
         self._status_badges['EURI'].setText(f"EURI {self._fmt_bal('EURI_free')} / locked {self._fmt_bal('EURI_locked')}")
