@@ -1,34 +1,50 @@
-# EUT v0.1.1 — Cockpit Stability + Runtime Foundation
+# EUT v0.2.0 — Deterministic Spread Harvester
 
-## Architecture
-- `app/core/runtime_state.py`: centralized runtime status model.
-- `app/core/polling_manager.py`: independent market/orders/balances timers with duplicate-start protection.
-- GUI (`app/gui/main_window.py`) consumes runtime state and polling manager, avoiding direct ad-hoc runtime storage.
+EUT is **NOT** a predictive trading AI.
 
-## Runtime Foundation
-- Runtime status bar: connection, runtime, polling, latency, REST age, orders age, trading state.
-- REST status states: `OK / STALE / ERROR`.
-- Future placeholders already visible: `WS`, `Spread Engine`, `Risk Guard`.
+EUT is a **deterministic spread execution engine** built around REST-first market polling and maker-order execution quality.
 
-## Polling
-- Independent intervals for market, orders, balances.
-- Safe `start/stop` lifecycle.
-- Duplicate timer protection prevents runaway timers.
-- Stale detection based on last REST timestamp age.
+## Core Philosophy
+- No AI trader
+- No prediction engine
+- No theory/ML subsystem
+- No analyzer trees
+- No overengineering
 
-## GUI Philosophy
-- Terminal-style dark cockpit.
-- Stable split layout: top status bar, left market/balances/quick stats, center manual trading, right open orders, bottom logs.
-- Compact widgets, fixed visual rhythm, sortable orders table, categorized logs with millisecond timestamps.
+Profit target comes from deterministic execution mechanics:
+- zero fee assumptions
+- stable spread capture
+- slow market conditions
+- maker fill quality
 
-## Future Roadmap (placeholders prepared)
-- Spread analyzer
-- Queue quality
-- Refill detection
-- Cycle statistics
-- Paper trading
-- Execution engine
-- Risk guard
+## Runtime Architecture
+`app/core/`
+- `runtime_fsm.py`
+- `polling_manager.py`
+- `spread_detector.py`
+- `order_manager.py`
+- `fill_tracker.py`
+- `risk_guard.py`
+- `market_service.py`
+- `account_service.py`
+- `order_service.py`
+
+## Runtime Flow
+MARKET POLL -> spread exists -> spread stable -> place BUY maker -> filled -> place SELL maker -> filled -> lock profit -> repeat.
+
+## GUI Focus (Execution Workstation)
+Cockpit exposes:
+- top runtime status (FSM, REST, polling, spread)
+- spread status panel
+- runtime FSM panel
+- order activity panel
+
+## Logging Markers
+- `[FSM]`
+- `[SPREAD]`
+- `[ORDER]`
+- `[FILL]`
+- `[RISK]`
 
 ## Setup
 ```bash
