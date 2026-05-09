@@ -146,6 +146,34 @@ class MainWindow(QMainWindow):
         self.logger.log('INFO', f"[BALANCE] live refresh reason={reason} EURI_free={balances.get('EURI_free', 0)}")
         return balances
 
+    def _cleanup_duplicate_side_orders(self) -> bool:
+        changed = False
+        side_map: dict[str, list[dict]] = {'BUY': [], 'SELL': []}
+        for order in self._last_open_orders:
+            side = str(order.get('side', '')).upper()
+            if side in side_map and order.get('orderId'):
+                side_map[side].append(order)
+        for side, orders in side_map.items():
+            if len(orders) <= 1:
+                continue
+            keep, *duplicates = sorted(orders, key=lambda o: int(o.get('updateTime') or o.get('time') or 0), reverse=True)
+            for duplicate in duplicates:
+                duplicate_id = int(duplicate.get('orderId'))
+                try:
+                    self.orders.cancel(duplicate_id)
+                    self.logger.log('INFO', f'[ORDERS] duplicate {side} canceled id={duplicate_id}')
+                    changed = True
+                except Exception as e:
+                    self.logger.log('INFO', f'[ORDERS] duplicate {side} cancel failed id={duplicate_id} err={e}')
+            keep_id = int(keep.get('orderId'))
+            if side == 'BUY':
+                self._active_buy_order_id = keep_id
+            else:
+                self._active_sell_order_id = keep_id
+        if changed:
+            self._refresh_orders_live('duplicate_cleanup')
+        return changed
+
     def _on_task_success(self,name,payload):
         if name=='market':
             self._last_market_snapshot=dict(payload)
@@ -288,6 +316,7 @@ class MainWindow(QMainWindow):
         if not self._live_running:
             return
         try:
+            self._cleanup_duplicate_side_orders()
             if c.state != CycleState.WAIT_READY:
                 old, new = c.transition(CycleState.WAIT_READY, 'continuous runtime')
                 self.logger.log('FSM', f'{old.value} -> {new.value} reason=continuous runtime')
@@ -452,11 +481,23 @@ class MainWindow(QMainWindow):
                 max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10)))
                 target_sell_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
                 target_sell_qty = min(floor_to_step(max(Decimal('0'), exchange_free_euri), step), target_sell_qty)
+                min_resize_delta_cfg = Decimal(str(self.cfg.get('min_resize_delta_euri', 1.0)))
+                min_resize_delta = max(step * Decimal('5'), Decimal(str(self.cfg.get('min_partial_fill_euri', 0))), min_resize_delta_cfg)
                 if c.sell_order_id and c.sell_order_id in open_order_ids and ask > 0 and not sell_grace_active:
                     os = self._orders_by_id.get(c.sell_order_id, {})
                     working_price = Decimal(str(os.get('price') or ask))
                     working_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
-                    if target_sell_qty > 0 and (ask != working_price or target_sell_qty != working_qty):
+                    qty_delta = abs(target_sell_qty - working_qty)
+                    if target_sell_qty > 0 and ask == working_price and qty_delta < min_resize_delta:
+                        self.logger.log('INFO', '[SELL] resize skipped delta too small')
+                    elif target_sell_qty > 0 and ask != working_price:
+                        self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={ask}')
+                        self.orders.cancel(c.sell_order_id)
+                        c.sell_order_id = None
+                        self._active_sell_order_id = None
+                        self._pending_sell_order = None
+                        self._pending_sell_grace_until = 0.0
+                    elif target_sell_qty > 0 and qty_delta >= min_resize_delta:
                         self.logger.log('INFO', f'[SELL] resize requested old_qty={working_qty} new_qty={target_sell_qty}')
                         self.logger.log('INFO', '[SELL] cancel for resize')
                         self.orders.cancel(c.sell_order_id)
