@@ -27,6 +27,7 @@ class PollingManager(QObject):
         }
         self._intervals = {'market': market_ms, 'orders': orders_ms, 'balances': balances_ms}
         self._running = False
+        self._private_enabled = False
         self._timers['market'].timeout.connect(self._market_cb)
         self._timers['orders'].timeout.connect(self._orders_cb)
         self._timers['balances'].timeout.connect(self._balances_cb)
@@ -34,8 +35,10 @@ class PollingManager(QObject):
     def start(self) -> bool:
         if self._running:
             return False
-        for key, timer in self._timers.items():
-            timer.start(self._intervals[key])
+        self._timers['market'].start(self._intervals['market'])
+        if self._private_enabled:
+            self._timers['orders'].start(self._intervals['orders'])
+            self._timers['balances'].start(self._intervals['balances'])
         self._running = True
         return True
 
@@ -43,13 +46,31 @@ class PollingManager(QObject):
         for timer in self._timers.values():
             timer.stop()
         self._running = False
+        self._private_enabled = False
 
     def set_intervals(self, market_ms: int, orders_ms: int, balances_ms: int) -> None:
         self._intervals = {'market': market_ms, 'orders': orders_ms, 'balances': balances_ms}
         if self._running:
-            for key, timer in self._timers.items():
-                timer.setInterval(self._intervals[key])
+            self._timers['market'].setInterval(self._intervals['market'])
+            if self._private_enabled:
+                self._timers['orders'].setInterval(self._intervals['orders'])
+                self._timers['balances'].setInterval(self._intervals['balances'])
 
     @property
     def running(self) -> bool:
         return self._running
+
+    def set_private_enabled(self, enabled: bool) -> None:
+        self._private_enabled = enabled
+        if not self._running:
+            return
+        if enabled:
+            self._timers['orders'].start(self._intervals['orders'])
+            self._timers['balances'].start(self._intervals['balances'])
+        else:
+            self._timers['orders'].stop()
+            self._timers['balances'].stop()
+
+    @property
+    def private_enabled(self) -> bool:
+        return self._private_enabled
