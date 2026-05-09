@@ -30,6 +30,14 @@ from app.core.account_service import AccountService
 from app.core.async_runner import TaskRunner
 from app.core.binance_client import BinanceClient, normalize_binance_error
 from app.core.config import load_config, save_config
+from app.core.execution_metrics import (
+    QueueQualityEstimator,
+    SpreadStabilityAnalyzer,
+    diff_order_transitions,
+    fill_probability_label,
+    format_latency_ms,
+    last_fill_time_label,
+)
 from app.core.filters import validate_order_from_exchange_info
 from app.core.formatting import format_age_ms
 from app.core.logger import AppLogger
@@ -79,6 +87,14 @@ class MainWindow(QMainWindow):
         self._last_market_log = None
         self._spread_value = None
         self._spread_since = None
+        self._latency_warning_ms = 400
+        self._order_reaction_ms = None
+        self._last_fill_ts = None
+        self._prev_open_order_ids = set()
+        self._spread_analyzer = SpreadStabilityAnalyzer()
+        self._queue_estimator = QueueQualityEstimator()
+        self._spread_stability = 'BAD'
+        self._queue_quality = 'MEDIUM'
 
         self.task_runner = TaskRunner(4, self)
         self.task_runner.signals.success.connect(self._on_task_success)
@@ -236,10 +252,16 @@ class MainWindow(QMainWindow):
         fsm_f = QFormLayout(fsm_box)
         self.s['State'] = self._value('-')
         fsm_f.addRow(QLabel('State'), self.s['State'])
+        exec_box = QGroupBox('Execution Metrics')
+        exec_f = QFormLayout(exec_box)
+        for key in ['Queue quality', 'Spread stability', 'Market latency', 'Order reaction', 'Fill probability', 'Last fill time']:
+            self.s[key] = self._value('-')
+            exec_f.addRow(QLabel(key), self.s[key])
 
         right_l.addWidget(manual_box)
         right_l.addWidget(activity_box)
         right_l.addWidget(fsm_box)
+        right_l.addWidget(exec_box)
         right_l.addStretch(1)
 
         center_splitter.addWidget(left_col)
@@ -328,12 +350,14 @@ class MainWindow(QMainWindow):
         elif name == 'market':
             s = payload
             self.runtime.mark_rest_update()
+            self.runtime.last_latency_ms = float(s.get('latency_ms', 0.0) or 0.0)
             self.m['Последняя'].setText(f"{Decimal(str(s.get('last', 0))):.8f}")
             self.m['Bid'].setText(f"{Decimal(str(s.get('bid', 0))):.8f}")
             self.m['Ask'].setText(f"{Decimal(str(s.get('ask', 0))):.8f}")
-            spread = Decimal(str(s.get('spread', 0)))
+            spread = Decimal(str(s.get('spread_source', s.get('spread', 0))))
             self._update_spread_panel(spread, s.get('spread_ticks', '-'))
             self.m['Возраст REST'].setText(str(s.get('rest_age', '-')))
+            self._update_execution_metrics(best_unchanged=bool(s.get('best_unchanged', False)))
             self._recalc_equity_total()
         elif name == 'balances':
             bal = payload
@@ -349,6 +373,8 @@ class MainWindow(QMainWindow):
                 self._last_balance_log_ts = now
         elif name == 'orders':
             data = payload
+            current_ids = {int(o.get('orderId')) for o in data if o.get('orderId') is not None}
+            self._handle_order_transitions(current_ids)
             self._orders_by_id = {int(o.get('orderId')): o for o in data if o.get('orderId') is not None}
             self.table.setRowCount(len(data))
             now_ms = int(time.time() * 1000)
@@ -364,10 +390,16 @@ class MainWindow(QMainWindow):
             self._update_order_activity()
         elif name == 'place_order':
             side = str(payload.get('side', ''))
+            self._order_reaction_ms = float(payload.get('_reaction_ms', 0.0) or 0.0)
+            self.logger.log('EXEC', f'Order reaction: {int(self._order_reaction_ms)} ms')
             self.logger.log('ОРДЕР', f'LIMIT {side} отправлен')
             self.refresh_orders(force=True)
             self.refresh_balances(force=True)
         elif name == 'cancel_order':
+            reaction = payload[0] if isinstance(payload, tuple) else payload
+            if isinstance(reaction, dict):
+                self._order_reaction_ms = float(reaction.get('_reaction_ms', 0.0) or 0.0)
+                self.logger.log('EXEC', f'Order reaction: {int(self._order_reaction_ms)} ms')
             self.logger.log('ОРДЕР', 'Отмена ордера выполнена')
             self.refresh_orders(force=True)
             self.refresh_balances(force=True)
@@ -430,7 +462,10 @@ class MainWindow(QMainWindow):
         self.s['Торговля'].setText('ON' if self.cfg.get('trading_enabled', False) else 'OFF')
         self.s['Только чтение'].setText('ON' if self.cfg.get('read_only', True) else 'OFF')
         self.s['WS'].setText('ON' if self.ws.enabled else 'OFF')
-        self.s['Задержка'].setText(self.runtime.last_public_latency_ms or '0ms')
+        latency = self.runtime.last_public_latency_ms or '0ms'
+        if self.runtime.last_latency_ms > self._latency_warning_ms:
+            latency = f'{latency} WARNING'
+        self.s['Задержка'].setText(latency)
         self._refresh_order_ages()
         self._update_order_activity()
         self._update_runtime_fsm()
@@ -449,7 +484,9 @@ class MainWindow(QMainWindow):
         self.b['Оценка всего USDT'].setText(f"{(usdt + euri * Decimal(self.m['Последняя'].text())):.8f}")
 
     def _update_spread_panel(self, spread: Decimal, ticks):
-        if spread > 0 and spread != self._spread_value:
+        if self._spread_since is None:
+            self._spread_since = time.time()
+        elif spread != self._spread_value:
             self._spread_since = time.time()
         self._spread_value = spread
         lifetime = int((time.time() - self._spread_since) * 1000) if self._spread_since else 0
@@ -457,6 +494,11 @@ class MainWindow(QMainWindow):
         self.m['Тики'].setText(str(ticks))
         self.m['Lifetime'].setText(f'{lifetime} ms')
         self.m['Stable'].setText('СТАБИЛЕН' if lifetime >= 3000 else 'НЕСТАБИЛЕН')
+        try:
+            tick_val = float(ticks)
+        except Exception:
+            tick_val = 0.0
+        self._spread_stability = self._spread_analyzer.classify(tick_val, lifetime)
 
     def _on_order_selected(self):
         row = self.table.currentRow()
@@ -507,6 +549,32 @@ class MainWindow(QMainWindow):
         for btn in (self.buy_btn, self.sell_btn):
             btn.setEnabled(enabled)
             btn.setToolTip('' if enabled else reason)
+
+    def _update_execution_metrics(self, best_unchanged: bool):
+        self._queue_quality = self._queue_estimator.classify(self._spread_stability, best_unchanged, self.runtime.last_latency_ms, self._latency_warning_ms)
+        self.s['Queue quality'].setText(self._queue_quality)
+        self.s['Spread stability'].setText(self._spread_stability)
+        self.s['Market latency'].setText(format_latency_ms(self.runtime.last_latency_ms))
+        self.s['Order reaction'].setText(format_latency_ms(self._order_reaction_ms))
+        self.s['Fill probability'].setText(fill_probability_label(0, 0))
+        self.s['Last fill time'].setText(last_fill_time_label(self._last_fill_ts))
+
+    def _handle_order_transitions(self, current_ids: set[int]):
+        transitions = diff_order_transitions(self._prev_open_order_ids, current_ids)
+        for event in transitions:
+            if event.transition == 'NEW':
+                self.logger.log('EXEC', f'Open order NEW #{event.order_id}')
+                continue
+            self.logger.log('EXEC', f'Open order disappeared #{event.order_id}')
+            status = self.orders.order_status(event.order_id)
+            final_status = str(status.get('status', 'UNKNOWN'))
+            if final_status == 'FILLED':
+                self.logger.log('EXEC', 'Order FILLED')
+                self._last_fill_ts = time.time()
+                self.logger.log('EXEC', 'Last fill time updated')
+            elif final_status == 'CANCELED':
+                self.logger.log('EXEC', 'Order CANCELED')
+        self._prev_open_order_ids = set(current_ids)
 
     def start_polling(self):
         if self.polling.start():

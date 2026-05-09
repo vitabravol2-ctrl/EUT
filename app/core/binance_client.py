@@ -96,3 +96,6 @@ class BinanceClient:
 
     def cancel_all_orders(self, symbol: str) -> list:
         return self._request('DELETE', '/api/v3/openOrders', params={'symbol': symbol}, signed=True)
+
+    def get_order(self, symbol: str, order_id: int) -> dict:
+        return self._request('GET', '/api/v3/order', params={'symbol': symbol, 'orderId': order_id}, signed=True)
