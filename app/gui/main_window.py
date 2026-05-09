@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView
 
 from app.core.account_service import AccountService
 from app.core.fill_observer import FillObserver, MarketActivity
@@ -13,7 +13,7 @@ from app.core.async_runner import TaskRunner
 from app.core.binance_client import BinanceAPIError, BinanceClient
 from app.core.config import load_config, save_config
 from app.core.execution_metrics import QueueQualityEstimator, SpreadStabilityAnalyzer
-from app.core.filters import validate_order_from_exchange_info
+from app.core.filters import normalize_price, normalize_qty, validate_order_from_exchange_info
 from app.core.harvest_readiness import HarvestReadinessEngine
 from app.core.harvest_cycle import CycleState, HarvestCycle
 from app.core.logger import AppLogger
@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
         self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
         self._cycle=HarvestCycle()
         self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
+        self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,3000,3000,self)
@@ -110,8 +111,8 @@ class MainWindow(QMainWindow):
         self.fo_bid=QLabel('-'); self.fo_ask=QLabel('-'); self.fo_window=QLabel('-'); self.fo_activity=QLabel('-'); self.fo_possible=QLabel('NO')
         for n,w in [('Fill: bid lifetime',self.fo_bid),('Fill: ask lifetime',self.fo_ask),('Fill: window',self.fo_window),('Fill: market activity',self.fo_activity),('Fill: possible',self.fo_possible)]: sl.addRow(n,w)
         right=QGroupBox('Actions'); rl=QVBoxLayout(right)
-        for t,f in [('Manual Order',self.open_manual_order),('Cancel Selected',self.cancel_selected),('Cancel All',self.cancel_all),('All Data',self.open_all_data),('Settings',self.open_settings)]: rl.addWidget(self._btn(t,f))
-        self.cancel_selected_btn=right.findChildren(QPushButton)[1]; self.cancel_all_btn=right.findChildren(QPushButton)[2]
+        for t,f in [('START HARVEST',self.start_harvest),('STOP HARVEST',self.stop_harvest),('Manual Order',self.open_manual_order),('Cancel Selected',self.cancel_selected),('Cancel All',self.cancel_all),('All Data',self.open_all_data),('Settings',self.open_settings)]: rl.addWidget(self._btn(t,f))
+        self.start_harvest_btn=right.findChildren(QPushButton)[0]; self.stop_harvest_btn=right.findChildren(QPushButton)[1]; self.cancel_selected_btn=right.findChildren(QPushButton)[3]; self.cancel_all_btn=right.findChildren(QPushButton)[4]
         split.addWidget(left); split.addWidget(cycle); split.addWidget(center); split.addWidget(spread_box); split.addWidget(right); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
@@ -174,6 +175,117 @@ class MainWindow(QMainWindow):
         for r,o in enumerate(payload):
             vals=[o.get('orderId'),o.get('side'),o.get('price'),o.get('origQty'),o.get('executedQty'),'0%',o.get('status'),'-']
             for c,v in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(v)))
+
+    def _risk_ok(self) -> tuple[bool, str]:
+        if self.cfg.get('harvest_mode') != 'LIVE_LOCKED':
+            return False, 'mode is not LIVE_LOCKED'
+        if not self.cfg.get('trading_enabled', False):
+            return False, 'trading disabled'
+        if not self._private_ok:
+            return False, 'trading not connected'
+        if not self._balances:
+            return False, 'balances not loaded'
+        if self.cfg.get('risk_guard_enabled', False):
+            return False, 'risk guard blocked'
+        if len(self._last_open_orders) > 0:
+            return False, 'open orders exist'
+        if self._cycle.open_position_qty > 0:
+            return False, 'active position exists'
+        if not self._spread_metrics or self._spread_metrics.state.readiness != ReadinessState.READY:
+            return False, 'spread not ready'
+        if not self._fill_observation or not self._fill_observation.fill_possible:
+            return False, 'fill possible NO'
+        return True, 'ok'
+
+    def start_harvest(self):
+        self.logger.log('INFO', '[LIVE] start requested')
+        ok, reason = self._risk_ok()
+        if not ok:
+            self.logger.log('RISK', f'[RISK] blocked reason={reason}')
+            if reason == 'mode is not LIVE_LOCKED':
+                self.logger.log('INFO', '[LIVE] blocked: mode is not LIVE_LOCKED')
+            return
+        if not self._live_confirmed:
+            answer = QMessageBox.question(self, 'LIVE Confirmation', 'Start LIVE harvest with real Binance orders?\nSmall test mode only.')
+            if answer != QMessageBox.Yes:
+                return
+            self._live_confirmed = True
+        self._live_running = True
+        old, new = self._cycle.transition(CycleState.WAIT_READY, 'start requested')
+        self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=start requested')
+
+    def stop_harvest(self):
+        self._live_running = False
+        self.logger.log('INFO', '[LIVE] stopped')
+        if self._cycle.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and self._cycle.buy_order_id:
+            try:
+                self.orders.cancel(self._cycle.buy_order_id)
+                self.logger.log('INFO', '[BUY] cancelled by STOP')
+            except Exception as e:
+                self.logger.log('ERROR', f'[BUY] cancel failed reason={e}')
+            old, new = self._cycle.transition(CycleState.STOPPED, 'stop after buy')
+            self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=stop after buy')
+        elif self._cycle.open_position_qty > 0:
+            old, new = self._cycle.transition(CycleState.EXIT_PENDING, 'stop with position')
+            self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=stop with position')
+        else:
+            old, new = self._cycle.transition(CycleState.STOPPED, 'stop idle')
+            self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=stop idle')
+
+    def _run_live_cycle(self):
+        c = self._cycle
+        if not self._live_running and c.state not in (CycleState.EXIT_PENDING, CycleState.SELL_WORKING, CycleState.SELL_PARTIAL):
+            return
+        try:
+            bid = Decimal(str(self._last_market_snapshot.get('bid', '0')))
+            ask = Decimal(str(self._last_market_snapshot.get('ask', '0')))
+            if c.state == CycleState.WAIT_READY and self._live_running:
+                old, new = c.transition(CycleState.PLACE_BUY, 'ready'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=ready')
+            if c.state == CycleState.PLACE_BUY:
+                quote = Decimal(str(self.cfg.get('order_quote_usdt', 10)))
+                qty = quote / bid if bid > 0 else Decimal('0')
+                if Decimal(str(self.cfg.get('max_position_euri', 0))) > 0 and qty > Decimal(str(self.cfg.get('max_position_euri', 0))):
+                    self.logger.log('RISK', '[RISK] blocked reason=max position EURI')
+                    c.transition(CycleState.ERROR, 'max position'); return
+                info = self._get_exchange_info()
+                price = Decimal(normalize_price(str(bid), '0.0001'))
+                qty_n = Decimal(normalize_qty(str(qty), '0.01'))
+                ok,msg=validate_order_from_exchange_info(str(price), str(qty_n), info)
+                if not ok: self.logger.log('ERROR', f'[BUY] rejected reason={msg}'); c.transition(CycleState.ERROR, msg); return
+                self.logger.log('INFO', f'[BUY] placing maker price={price} qty={qty_n}')
+                resp = self.orders.place_limit_maker('BUY', str(qty_n), str(price))
+                c.buy_order_id = int(resp.get('orderId')); c.buy_requested_qty = qty_n; c.target_qty = qty_n; self._buy_started_at = __import__('time').time()
+                old,new=c.transition(CycleState.BUY_WORKING, 'buy accepted'); self.logger.log('INFO', f"[BUY] accepted id={c.buy_order_id}"); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=buy accepted')
+            if c.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and c.buy_order_id:
+                st=self.orders.order_status(c.buy_order_id); status=st.get('status'); exec_qty=Decimal(str(st.get('executedQty','0'))); px=Decimal(str(st.get('price') or bid or '0'))
+                delta=exec_qty-c.buy_filled_qty
+                if delta>0: c.apply_buy_fill(delta, px); self.logger.log('INFO', f'[BUY] partial filled={c.buy_filled_qty}')
+                ttl=int(self.cfg.get('entry_order_ttl_sec',30))
+                now=__import__('time').time()
+                if status=='FILLED': old,new=c.transition(CycleState.BUY_FILLED,'buy filled'); self.logger.log('INFO','[BUY] filled'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=buy filled')
+                elif now-self._buy_started_at>ttl:
+                    self.orders.cancel(c.buy_order_id); self.logger.log('INFO','[BUY] cancelled ttl')
+                    old,new=c.transition(CycleState.WAIT_READY if c.buy_filled_qty==0 else CycleState.PLACE_SELL,'buy ttl'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=buy ttl')
+            if c.state == CycleState.BUY_FILLED: c.transition(CycleState.PLACE_SELL, 'sell next')
+            if c.state == CycleState.PLACE_SELL:
+                sell_qty = c.buy_filled_qty - c.sell_filled_qty
+                if sell_qty <= 0: c.transition(CycleState.ERROR, 'sell qty invalid'); return
+                price = ask
+                self.logger.log('INFO', f'[SELL] placing maker price={price} qty={sell_qty}')
+                resp = self.orders.place_limit_maker('SELL', str(sell_qty), str(price))
+                c.sell_order_id = int(resp.get('orderId')); c.sell_requested_qty = sell_qty; self._sell_started_at = __import__('time').time()
+                old,new=c.transition(CycleState.SELL_WORKING,'sell accepted'); self.logger.log('INFO', f'[SELL] accepted id={c.sell_order_id}'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=sell accepted')
+            if c.state in (CycleState.SELL_WORKING, CycleState.SELL_PARTIAL, CycleState.EXIT_PENDING) and c.sell_order_id:
+                st=self.orders.order_status(c.sell_order_id); status=st.get('status'); exec_qty=Decimal(str(st.get('executedQty','0'))); px=Decimal(str(st.get('price') or ask or '0'))
+                delta=exec_qty-c.sell_filled_qty
+                if delta>0: c.apply_sell_fill(delta, px); self.logger.log('INFO', f'[SELL] partial filled={c.sell_filled_qty}')
+                if status=='FILLED':
+                    old,new=c.transition(CycleState.PROFIT_LOCKED,'sell filled'); self.logger.log('INFO','[SELL] filled'); self.logger.log('INFO', f'[PNL] realized={c.realized_pnl}'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=sell filled')
+            if c.state == CycleState.PROFIT_LOCKED:
+                old,new=c.transition(CycleState.IDLE,'cycle done'); self.logger.log('FSM', f'[FSM] {old.value} -> {new.value} reason=cycle done'); self._live_running=False
+        except Exception as e:
+            self.logger.log('ERROR', f'[LIVE] runtime error: {e}')
+            c.transition(CycleState.ERROR, str(e))
     def _tick_status(self):
         self._status_badges['SYSTEM'].setText('SYSTEM OK'); self._status_badges['TRADING'].setText(f"TRADING {'ON' if self.cfg.get('trading_enabled',False) else 'OFF'}")
         self._status_badges['EURI'].setText(f"EURI {self._fmt_bal('EURI_free')} / locked {self._fmt_bal('EURI_locked')}")
@@ -182,6 +294,8 @@ class MainWindow(QMainWindow):
         self._status_badges['HARVEST'].setText('HARVEST READY' if self._private_ok else 'HARVEST NOT_READY')
         self._status_badges['ORDERS'].setText(f'ORDERS {len(self._last_open_orders)}'); self._status_badges['RISK'].setText(f"RISK {'BLOCKED' if self.cfg.get('risk_guard_enabled') else 'OK'}")
         enabled=self._private_ok; self.cancel_all_btn.setEnabled(enabled); self.cancel_selected_btn.setEnabled(enabled and self._selected_order_id is not None)
+        risk_ok,_ = self._risk_ok(); self.start_harvest_btn.setEnabled(risk_ok and not self._live_running); self.stop_harvest_btn.setEnabled(self._live_running or self._cycle.open_position_qty > 0)
+        self._run_live_cycle()
     def _fmt_bal(self,k):
         if not self._private_ok and not self._balances: return '-'
         return f"{Decimal(str(self._balances.get(k,0))):.2f}"

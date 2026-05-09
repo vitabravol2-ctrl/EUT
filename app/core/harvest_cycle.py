@@ -27,6 +27,8 @@ class CycleState(str, Enum):
     SELL_FILLED = 'SELL_FILLED'
     PROFIT_LOCKED = 'PROFIT_LOCKED'
     EXIT_PENDING = 'EXIT_PENDING'
+    STOPPED = 'STOPPED'
+    ERROR = 'ERROR'
     RESET = 'RESET'
 
 
