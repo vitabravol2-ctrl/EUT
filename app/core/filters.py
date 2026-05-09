@@ -41,7 +41,7 @@ def normalize_qty(qty: str | float, step_size: str) -> str:
     return format_decimal_for_step(_d(qty), _d(step_size))
 
 
-def _extract_filter_values(exchange_info: dict) -> tuple[str, str, str, str]:
+def extract_symbol_filters(exchange_info: dict) -> dict[str, str]:
     symbols = exchange_info.get('symbols') or []
     symbol_data = symbols[0] if symbols else {}
     filters = {f.get('filterType'): f for f in (symbol_data.get('filters') or []) if isinstance(f, dict)}
@@ -53,8 +53,15 @@ def _extract_filter_values(exchange_info: dict) -> tuple[str, str, str, str]:
     tick_size = str(price_filter.get('tickSize', '0'))
     step_size = str(lot_size.get('stepSize', '0'))
     min_qty = str(lot_size.get('minQty', '0'))
+    max_qty = str(lot_size.get('maxQty', '0'))
     min_notional = str(notional_filter.get('minNotional', '0'))
-    return tick_size, step_size, min_qty, min_notional
+    return {
+        'tickSize': tick_size,
+        'stepSize': step_size,
+        'minQty': min_qty,
+        'maxQty': max_qty,
+        'minNotional': min_notional,
+    }
 
 
 def validate_order(price: str, qty: str, *, tick_size: str, step_size: str, min_qty: str, min_notional: str) -> tuple[bool, str]:
@@ -76,5 +83,12 @@ def validate_order(price: str, qty: str, *, tick_size: str, step_size: str, min_
 
 
 def validate_order_from_exchange_info(price: str, qty: str, exchange_info: dict) -> tuple[bool, str]:
-    tick_size, step_size, min_qty, min_notional = _extract_filter_values(exchange_info)
-    return validate_order(price, qty, tick_size=tick_size, step_size=step_size, min_qty=min_qty, min_notional=min_notional)
+    filters = extract_symbol_filters(exchange_info)
+    return validate_order(
+        price,
+        qty,
+        tick_size=filters['tickSize'],
+        step_size=filters['stepSize'],
+        min_qty=filters['minQty'],
+        min_notional=filters['minNotional'],
+    )

@@ -13,7 +13,7 @@ from app.core.async_runner import TaskRunner
 from app.core.binance_client import BinanceAPIError, BinanceClient
 from app.core.config import load_config, save_config
 from app.core.execution_metrics import QueueQualityEstimator, SpreadStabilityAnalyzer
-from app.core.filters import format_decimal_for_step, format_decimal_for_tick, floor_to_step, floor_to_tick, normalize_price, normalize_qty, validate_order_from_exchange_info
+from app.core.filters import extract_symbol_filters, format_decimal_for_step, format_decimal_for_tick, floor_to_step, floor_to_tick, normalize_price, normalize_qty, validate_order, validate_order_from_exchange_info
 from app.core.harvest_readiness import HarvestReadinessEngine
 from app.core.harvest_cycle import CycleState, HarvestCycle
 from app.core.logger import AppLogger
@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('EUT v0.3.6 — Cockpit Repair'); self.setMinimumSize(1200,700); self.setStyleSheet(DARK_STYLESHEET); self.setFont(QFont('', APP_FONT_PT))
         self.logger=AppLogger(max_records=500,dedupe_seconds=30); self.cfg=load_config(); self.runtime=RuntimeState(); self.ws=WSManager(enabled=False)
-        self._last_market_snapshot={}; self._last_open_orders=[]; self._balances={}; self._status_badges={}; self._orders_by_id={}; self._selected_order_id=None
+        self._last_market_snapshot={}; self._last_open_orders=[]; self._balances={}; self._status_badges={}; self._orders_by_id={}; self._selected_order_id=None; self._exchange_filters={}
         self._spread_analyzer=SpreadStabilityAnalyzer(); self._queue_estimator=QueueQualityEstimator(); self._harvest_engine=HarvestReadinessEngine(); self._private_ok=False
         self._spread_engine=SpreadStabilityEngine(Decimal('0.0001'), int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
         self._spread_metrics=None; self._last_spread_readiness=None
@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
         split.addWidget(left); split.addWidget(cycle); split.addWidget(center); split.addWidget(spread_box); split.addWidget(right); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
-    def _startup_connect_flow(self): self.refresh_market(True); self.refresh_balances(True); self.refresh_orders(True); self.start_polling()
+    def _startup_connect_flow(self): self._load_exchange_filters(); self.refresh_market(True); self.refresh_balances(True); self.refresh_orders(True); self.start_polling()
     def open_settings(self): self.settings_dialog=SettingsDialog(self.cfg,self.apply_settings,self.test_connection,self); self.settings_dialog.show()
     def open_trade_settings(self): self.trade_settings_dialog=TradeSettingsDialog(self.cfg,self.apply_trade_settings,self); self.trade_settings_dialog.show()
     def open_manual_order(self): self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
@@ -266,9 +266,12 @@ class MainWindow(QMainWindow):
                 if Decimal(str(self.cfg.get('max_position_euri', 0))) > 0 and raw_qty > Decimal(str(self.cfg.get('max_position_euri', 0))):
                     self.logger.log('RISK', '[RISK] blocked reason=max position EURI')
                     c.transition(CycleState.ERROR, 'max position'); return
-                info = self._get_exchange_info()
-                tick = Decimal(str(info.get('tickSize', '0.0001')))
-                step = Decimal(str(info.get('stepSize', '0.01')))
+                if not self._require_exchange_filters():
+                    self.logger.log('RISK', '[RISK] blocked: exchange filters missing')
+                    c.transition(CycleState.ERROR, 'exchange filters missing'); return
+                info = self._exchange_filters
+                tick = Decimal(str(info.get('tickSize')))
+                step = Decimal(str(info.get('stepSize')))
                 price = floor_to_tick(bid, tick)
                 qty_n = floor_to_step(raw_qty, step)
                 api_price = format_decimal_for_tick(price, tick)
@@ -276,9 +279,8 @@ class MainWindow(QMainWindow):
                 notional = qty_n * price
                 self.logger.log('INFO', f'[BUY] raw_qty={raw_qty}')
                 self.logger.log('INFO', f'[BUY] normalized_qty={qty_n}')
-                self.logger.log('INFO', f"[BUY] filters raw LOT_SIZE={info.get('LOT_SIZE')}")
-                self.logger.log('INFO', f"[BUY] filters raw MARKET_LOT_SIZE={info.get('MARKET_LOT_SIZE')}")
-                self.logger.log('INFO', f"[BUY] filters raw PRICE_FILTER={info.get('PRICE_FILTER')}")
+                self.logger.log('INFO', f"[BUY] filters tickSize={info.get('tickSize')}")
+                self.logger.log('INFO', f"[BUY] filters stepSize={info.get('stepSize')}")
                 self.logger.log('INFO', f'[BUY] notional={notional}')
                 if qty_n <= 0 or qty_n < Decimal(str(info.get('minQty', '0'))):
                     self.logger.log('RISK', '[RISK] blocked: qty below minQty after step rounding')
@@ -288,7 +290,7 @@ class MainWindow(QMainWindow):
                     self.logger.log('RISK', '[RISK] blocked: USDT balance too low')
                     c.transition(CycleState.ERROR, 'insufficient balance')
                     return
-                ok,msg=validate_order_from_exchange_info(api_price, api_qty, info)
+                ok,msg=validate_order(api_price, api_qty, tick_size=info['tickSize'], step_size=info['stepSize'], min_qty=info['minQty'], min_notional=info['minNotional'])
                 if not ok: self.logger.log('ERROR', f'[BUY] rejected reason={msg}'); c.transition(CycleState.ERROR, msg); return
                 qty_aligned = 'YES' if Decimal(api_qty) == floor_to_step(Decimal(api_qty), step) else 'NO'
                 price_aligned = 'YES' if Decimal(api_price) == floor_to_tick(Decimal(api_price), tick) else 'NO'
@@ -380,15 +382,35 @@ class MainWindow(QMainWindow):
         c = self._cycle
         self.cs_state.setText(c.state.value); self.cs_target.setText(str(c.target_qty)); self.cs_bought.setText(str(c.buy_filled_qty)); self.cs_sold.setText(str(c.sell_filled_qty)); self.cs_open.setText(str(c.open_position_qty)); self.cs_avg_buy.setText(str(c.buy_avg_price)); self.cs_avg_sell.setText(str(c.sell_avg_price)); self.cs_pnl.setText(str(c.realized_pnl)); self.cs_order.setText(str(c.sell_order_id or c.buy_order_id or '-')); self.cs_reason.setText(c.reason or '-')
     def _get_exchange_info(self): return self.client.get_exchange_info(self.cfg['symbol'])
+    def _load_exchange_filters(self):
+        try:
+            filters = extract_symbol_filters(self._get_exchange_info())
+            required = ('tickSize', 'stepSize', 'minQty', 'maxQty', 'minNotional')
+            if any(filters.get(k, '0') in ('0', '', 'None', 'none', 'null') for k in required):
+                self._exchange_filters = {}
+                self.logger.log('RISK', '[RISK] blocked: exchange filters missing')
+                return False
+            self._exchange_filters = filters
+            self.logger.log('INFO', f"[FILTERS] loaded symbol={self.cfg['symbol']} tickSize={filters['tickSize']} stepSize={filters['stepSize']} minQty={filters['minQty']} minNotional={filters['minNotional']}")
+            self.market.set_tick_size(Decimal(str(filters['tickSize'])))
+            return True
+        except Exception as e:
+            self._exchange_filters = {}
+            self.logger.log('ERROR', f'[FILTERS] load failed reason={e}')
+            self.logger.log('RISK', '[RISK] blocked: exchange filters missing')
+            return False
+    def _require_exchange_filters(self): return bool(self._exchange_filters) or self._load_exchange_filters()
     def place(self, side, price, qty):
         if not self._private_ok and not self.cfg.get('api_key'): self.logger.log('ERROR','[ORDER] rejected reason=private api unavailable'); return
         try:
-            info = self._get_exchange_info()
-            tick = Decimal(str(info.get('tickSize', '0.0001')))
-            step = Decimal(str(info.get('stepSize', '0.01')))
+            if not self._require_exchange_filters():
+                self.logger.log('RISK', '[RISK] blocked: exchange filters missing'); return
+            info = self._exchange_filters
+            tick = Decimal(str(info.get('tickSize')))
+            step = Decimal(str(info.get('stepSize')))
             api_price = format_decimal_for_tick(Decimal(str(price)), tick)
             api_qty = format_decimal_for_step(Decimal(str(qty)), step)
-            ok,msg=validate_order_from_exchange_info(api_price, api_qty, info)
+            ok,msg=validate_order(api_price, api_qty, tick_size=info['tickSize'], step_size=info['stepSize'], min_qty=info['minQty'], min_notional=info['minNotional'])
             if not ok: self.logger.log('ERROR', f'[ORDER] rejected reason={msg}'); return
             self.logger.log('INFO', f'[ORDER] {side} LIMIT sent price={api_price} qty={api_qty}')
             resp=self.orders.place_limit(side,api_qty,api_price); self.logger.log('INFO', f"[ORDER] accepted id={resp.get('orderId')}")
@@ -403,7 +425,11 @@ class MainWindow(QMainWindow):
         try: self.orders.cancel_all(); self.logger.log('INFO','cancel all requested'); self.refresh_orders(True)
         except Exception as e: self.logger.log('ERROR',f'cancel all failed: {e}')
     def start_polling(self): self.polling.start(); self.runtime.set_polling(True)
-    def _all_data_text(self, group): return group
+    def _all_data_text(self, group):
+        if group == 'Filters':
+            f = self._exchange_filters
+            return f"symbol={self.cfg.get('symbol','EURIUSDT')}\ntickSize={f.get('tickSize','-')}\nstepSize={f.get('stepSize','-')}\nminQty={f.get('minQty','-')}\nmaxQty={f.get('maxQty','-')}\nminNotional={f.get('minNotional','-')}"
+        return group
 
 def run():
     app=QApplication(sys.argv); w=MainWindow(); w.show(); sys.exit(app.exec())
