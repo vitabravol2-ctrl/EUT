@@ -79,6 +79,29 @@ def test_partial_buy_creates_immediate_sell(qapp):
     assert any(side == 'SELL' for side, _, _ in w.orders.placed)
 
 
+def test_partial_sell_creates_immediate_buy(qapp):
+    w = _ready_window()
+    w._cycle.sell_filled_qty = Decimal('10')
+    w._balances['USDT_free'] = '1000'
+    w._run_live_cycle()
+    assert any(side == 'BUY' for side, _, _ in w.orders.placed)
+
+
+def test_position_does_not_block_runtime(qapp):
+    w = _ready_window()
+    w._cycle.open_position_qty = Decimal('10')
+    ok, reason = w._risk_ok()
+    assert ok is True
+    assert reason == 'ok'
+
+
+def test_gui_orders_match_exchange_orders(qapp):
+    w = _ready_window()
+    payload = [{'orderId': 1, 'side': 'BUY', 'price': '1.1', 'origQty': '1', 'executedQty': '0', 'status': 'NEW'}]
+    w._sync_open_orders(payload)
+    assert w.table.rowCount() == 1
+
+
 def test_fresh_buy_not_reconciled_during_grace_window(qapp):
     w = _ready_window()
     w.orders = _AlwaysMissingOrders()
