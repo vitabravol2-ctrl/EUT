@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+from shiboken6 import isValid
 
 
 class WorkerSignals(QObject):
@@ -18,14 +19,22 @@ class _Task(QRunnable):
         self.fn = fn
         self.signals = signals
 
+    def _safe_emit(self, signal: Signal, *args: object) -> None:
+        if not isValid(self.signals):
+            return
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            return
+
     def run(self) -> None:
         try:
             result = self.fn()
-            self.signals.success.emit(self.name, result)
+            self._safe_emit(self.signals.success, self.name, result)
         except Exception as exc:
-            self.signals.error.emit(self.name, str(exc))
+            self._safe_emit(self.signals.error, self.name, str(exc))
         finally:
-            self.signals.finished.emit(self.name)
+            self._safe_emit(self.signals.finished, self.name)
 
 
 class TaskRunner(QObject):
