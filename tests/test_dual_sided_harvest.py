@@ -183,3 +183,24 @@ def test_buy_and_sell_coexist_simultaneously(qapp):
     w._run_live_cycle()
     sides = {side for side, _, _ in w.orders.placed}
     assert 'BUY' in sides and 'SELL' in sides
+
+
+def test_sell_resize_cancels_then_reposts(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '5'
+    w._last_open_orders = [{'orderId': 99, 'side': 'SELL', 'origQty': '4.54', 'executedQty': '0', 'price': '1.1001', 'status': 'NEW'}]
+    w._orders_by_id = {99: w._last_open_orders[0]}
+    w._cycle.sell_order_id = 99
+    cancelled = []
+    w.orders.cancel = lambda order_id: cancelled.append(order_id) or {'status': 'CANCELED'}
+    w._run_live_cycle()
+    assert cancelled == [99]
+    assert any(side == 'SELL' for side, _, _ in w.orders.placed)
+
+
+def test_watch_state_does_not_block_if_spread_ticks_meet_min(qapp):
+    w = _ready_window()
+    w._spread_metrics = type('M', (), {'state': type('S', (), {'readiness': ReadinessState.WATCH})()})()
+    ok, reason = w._risk_ok()
+    assert ok is True
+    assert reason == 'ok'

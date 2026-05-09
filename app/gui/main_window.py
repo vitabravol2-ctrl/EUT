@@ -208,7 +208,18 @@ class MainWindow(QMainWindow):
             return False, 'balances not loaded'
         if self.cfg.get('risk_guard_enabled', False):
             return False, 'risk guard blocked'
-        if not self._spread_metrics or self._spread_metrics.state.readiness != ReadinessState.READY:
+        if not self._spread_metrics:
+            return False, 'spread not ready'
+        spread_ready = self._spread_metrics.state.readiness == ReadinessState.READY
+        spread_ticks = Decimal('0')
+        if self._last_market_snapshot and self._exchange_filters:
+            bid = Decimal(str(self._last_market_snapshot.get('bid', '0')))
+            ask = Decimal(str(self._last_market_snapshot.get('ask', '0')))
+            tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001')))
+            if bid > 0 and ask > bid and tick > 0:
+                spread_ticks = (ask - bid) / tick
+        min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
+        if not spread_ready and spread_ticks < min_spread_ticks:
             return False, 'spread not ready'
         if not self._fill_observation or not self._fill_observation.fill_possible:
             return False, 'fill not possible'
@@ -372,6 +383,7 @@ class MainWindow(QMainWindow):
             if c.sell_order_id:
                 so = self._orders_by_id.get(c.sell_order_id, {})
                 pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
+            available_for_sell = floor_to_step(max(Decimal('0'), exchange_free_euri + pending_sell_qty), step)
             available_sell_qty = floor_to_step(max(Decimal('0'), exchange_free_euri - pending_sell_qty), step)
             self.cs_avail_sell_qty.setText(str(available_sell_qty))
             self.cs_pending_sell_qty.setText(str(pending_sell_qty))
@@ -416,12 +428,27 @@ class MainWindow(QMainWindow):
                     self._active_sell_order_id = None
                     self._pending_sell_order = None
                     self._pending_sell_grace_until = 0.0
+                max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10)))
+                target_sell_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
+                target_sell_qty = min(available_for_sell, target_sell_qty)
+                if c.sell_order_id and c.sell_order_id in open_order_ids and ask > 0 and not sell_grace_active:
+                    os = self._orders_by_id.get(c.sell_order_id, {})
+                    working_price = Decimal(str(os.get('price') or ask))
+                    working_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
+                    if target_sell_qty > 0 and (ask != working_price or target_sell_qty != working_qty):
+                        self.logger.log('INFO', f'[SELL] resize requested old_qty={working_qty} new_qty={target_sell_qty}')
+                        self.logger.log('INFO', '[SELL] cancel for resize')
+                        self.orders.cancel(c.sell_order_id)
+                        self.logger.log('INFO', '[SELL] resize confirmed')
+                        c.sell_order_id = None
+                        self._active_sell_order_id = None
+                        self._pending_sell_order = None
+                        self._pending_sell_grace_until = 0.0
                 if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
-                    max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10)))
-                    sell_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
-                    sell_qty = min(available_sell_qty, sell_qty)
+                    sell_qty = target_sell_qty
                     if sell_qty > 0:
                         price = floor_to_tick(ask, tick)
+                        self.logger.log('INFO', f'[SELL] reposting best_ask qty={sell_qty}')
                         resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
                         c.sell_order_id = int(resp.get('orderId'))
                         c.sell_requested_qty = sell_qty
