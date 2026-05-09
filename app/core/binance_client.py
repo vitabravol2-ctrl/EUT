@@ -30,11 +30,13 @@ def normalize_binance_error(exc: Exception) -> str:
 
 
 class BinanceClient:
-    def __init__(self, api_key: str = '', api_secret: str = '', testnet: bool = False) -> None:
+    def __init__(self, api_key: str = '', api_secret: str = '', testnet: bool = False, request_timeout_sec: float = 3.0) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = 'https://testnet.binance.vision' if testnet else 'https://api.binance.com'
         self.recv_window = 5000
+        self.request_timeout_sec = request_timeout_sec
+        self.private_timeout_sec = min(5.0, max(3.0, request_timeout_sec + 2.0))
 
     def _headers(self) -> dict:
         return {'X-MBX-APIKEY': self.api_key}
@@ -54,7 +56,8 @@ class BinanceClient:
         last_error = None
         for _ in range(retries + 1):
             try:
-                response = requests.request(method, url, params=call_params, headers=headers, timeout=10)
+                timeout = self.private_timeout_sec if signed else self.request_timeout_sec
+                response = requests.request(method, url, params=call_params, headers=headers, timeout=timeout)
                 data = response.json()
                 if response.status_code >= 400:
                     raise BinanceAPIError(f"HTTP {response.status_code}: {data.get('msg', data)}", code=data.get('code'), status_code=response.status_code)

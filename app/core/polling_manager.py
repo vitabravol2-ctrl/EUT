@@ -46,7 +46,6 @@ class PollingManager(QObject):
         for timer in self._timers.values():
             timer.stop()
         self._running = False
-        self._private_enabled = False
 
     def set_intervals(self, market_ms: int, orders_ms: int, balances_ms: int) -> None:
         self._intervals = {'market': market_ms, 'orders': orders_ms, 'balances': balances_ms}
