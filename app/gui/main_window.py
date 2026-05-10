@@ -557,7 +557,6 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def _refresh_trade_stats_cache(self):
         s = self._trade_ledger.snapshot()
-        self._refresh_trade_stats_cache()
         self._trade_stats = {'total': s['total_fills'], 'buy_fills': s['buy_fills'], 'sell_fills': s['sell_fills'], 'cycles': s['completed_cycles'], 'wins': s['winning_cycles'], 'realized_pnl': s['realized_pnl'], 'ticks': s['spread_captured_ticks_total'], 'fees': s['fees'], 'inventory_sells_count': int(s['inventory_sell_qty'] > 0), 'inventory_sells_qty': s['inventory_sell_qty'], 'inventory_sells_quote': s['inventory_sell_quote']}
 
     def _risk_ok(self) -> tuple[bool, str]:
