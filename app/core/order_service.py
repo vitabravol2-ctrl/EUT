@@ -45,3 +45,9 @@ class OrderService:
         resp = self.client.create_limit_maker_order(self.symbol, side=side, quantity=qty, price=price)
         resp['_reaction_ms'] = (time.perf_counter() - start) * 1000
         return resp
+
+    def place_market(self, side: str, qty: str) -> dict:
+        start = time.perf_counter()
+        resp = self.client.create_market_order(self.symbol, side=side, quantity=qty)
+        resp['_reaction_ms'] = (time.perf_counter() - start) * 1000
+        return resp
