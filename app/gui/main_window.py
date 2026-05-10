@@ -518,27 +518,37 @@ class MainWindow(QMainWindow):
         return True, 'ok'
 
     def start_harvest(self):
+        self.logger.log('INFO', '[LIVE] start clicked')
         if not self._private_ok:
             self.logger.log('RISK', '[RISK] blocked: not connected')
             return
         if self._cycle.state == CycleState.ERROR:
             self._cycle = HarvestCycle()
             old, new = self._cycle.transition(CycleState.WAIT_READY, 'start reset from error')
-            self._live_running = True
+            self._start_live_runtime()
             self.logger.log('FSM', f'{CycleState.ERROR.value} -> {CycleState.RESET.value} reason=start reset')
-            self.logger.log('INFO', '[LIVE] runtime started')
             self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
+            return
+        ok, reason = self._risk_ok()
+        if not ok:
+            self.logger.log('RISK', f'[RISK] blocked: reason={reason}')
             return
         if not self._live_confirmed:
             answer = QMessageBox.question(self, 'LIVE Confirmation', 'Start LIVE harvest with real Binance orders?\nSmall test mode only.')
             if answer != QMessageBox.Yes:
+                self.logger.log('INFO', '[LIVE] start cancelled')
                 return
             self._live_confirmed = True
+        old, new = self._start_live_runtime()
+        self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
+
+    def _start_live_runtime(self):
         self._live_running = True
+        self._runtime_active = True
         self._cycle_started_at = time.time()
         old, new = self._cycle.transition(CycleState.WAIT_READY, 'start requested')
         self.logger.log('INFO', '[LIVE] runtime started')
-        self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
+        return old, new
 
     def stop_harvest(self):
         self._live_running = False
@@ -583,15 +593,18 @@ class MainWindow(QMainWindow):
             bid = Decimal(str(self._last_market_snapshot.get('bid', '0')))
             ask = Decimal(str(self._last_market_snapshot.get('ask', '0')))
             if bid <= 0 or ask <= 0 or ask <= bid:
+                self._log_throttled('live_wait_market_stale', '[LIVE] waiting: market stale', 7.0)
                 return
             filters = self.get_symbol_filters()
             if not filters:
+                self._log_throttled('live_wait_spread_not_ready', '[LIVE] waiting: spread not ready', 7.0)
                 return
             tick = Decimal(str(filters.get('tickSize', '0.0001')))
             step = Decimal(str(filters.get('stepSize', '0.0001')))
             min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
             spread_ticks = (ask - bid) / tick if tick > 0 else Decimal('0')
             if spread_ticks < min_spread_ticks:
+                self._log_throttled('live_wait_spread_not_ready', '[LIVE] waiting: spread not ready', 7.0)
                 return
             max_long = Decimal(str(self.cfg.get('max_long_inventory_euri', 500)))
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
