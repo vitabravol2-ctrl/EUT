@@ -711,13 +711,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self._set_pnl_color(self.cs_last_closed_pnl, s.get('last_closed_trade_pnl', Decimal('0')))
         self._set_pnl_color(self.cs_winrate, s['winrate'] - Decimal('50'))
 
-    def _set_pnl_color(self, label: QLabel, value: Decimal):
+    def _set_pnl_color(self, label: QLabel | None, value: Decimal):
         color = '#9e9e9e'
         if value > 0:
             color = '#2ecc71'
         elif value < 0:
             color = '#ff5c5c'
-        label.setStyleSheet(f'color: {color};')
+        self._set_label_color(label, color)
 
     def _risk_ok(self) -> tuple[bool, str]:
         if not self.cfg.get('trading_enabled', False):
