@@ -169,7 +169,11 @@ class MainWindow(QMainWindow):
         left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_pair_profile=QLabel('-'); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
         self.pair_selector = QComboBox(); self.pair_selector.addItems(list_pairs()); self.pair_selector.currentTextChanged.connect(self._on_pair_selected)
         for n,w in [('PAIR',self.pair_selector),('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Pair profile',self.ts_pair_profile),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
-        fl.addRow(self._btn('START HARVEST', self.start_harvest)); fl.addRow(self._btn('STOP HARVEST', self.stop_harvest)); fl.addRow(self._btn('Edit Settings', self.open_trade_settings))
+        self.start_button = QPushButton('START HARVEST')
+        self.start_button.clicked.connect(self.start_harvest)
+        self.stop_button = self._btn('STOP HARVEST', self.stop_harvest)
+        self.edit_settings_button = self._btn('Edit Settings', self.open_trade_settings)
+        fl.addRow(self.start_button); fl.addRow(self.stop_button); fl.addRow(self.edit_settings_button)
         cycle=QGroupBox('Runtime / Stats'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
         self.cs_inv_portfolio=QLabel('-'); self.cs_inv_base_value=QLabel('-'); self.cs_inv_quote_value=QLabel('-'); self.cs_inv_ratio=QLabel('-'); self.cs_inv_drift=QLabel('-')
         self.cs_trades=QLabel('0'); self.cs_winrate=QLabel('0.0%'); self.cs_data_source=QLabel('REST'); self.cs_open_orders=QLabel('0')
@@ -186,9 +190,9 @@ class MainWindow(QMainWindow):
         for n,w in [('Fill: bid lifetime',self.fo_bid),('Fill: ask lifetime',self.fo_ask),('Fill: window',self.fo_window),('Fill: market activity',self.fo_activity),('Fill: possible',self.fo_possible)]: sl.addRow(n,w)
         right=QGroupBox('Actions'); rl=QVBoxLayout(right)
         for t,f in [('Manual Order',self.open_manual_order),('Cancel Selected',self.cancel_selected),('Cancel All',self.cancel_all),('All Data',self.open_all_data),('Settings',self.open_settings)]: rl.addWidget(self._btn(t,f))
-        left_buttons = left.findChildren(QPushButton)
-        self.start_harvest_btn=left_buttons[0]; self.stop_harvest_btn=left_buttons[1]; self.cancel_selected_btn=right.findChildren(QPushButton)[1]; self.cancel_all_btn=right.findChildren(QPushButton)[2]
-        self.manual_order_btn=right.findChildren(QPushButton)[0]; self.all_data_btn=right.findChildren(QPushButton)[3]; self.settings_btn=right.findChildren(QPushButton)[4]
+        right_buttons = right.findChildren(QPushButton)
+        self.start_harvest_btn=self.start_button; self.stop_harvest_btn=self.stop_button; self.cancel_selected_btn=right_buttons[1]; self.cancel_all_btn=right_buttons[2]
+        self.manual_order_btn=right_buttons[0]; self.all_data_btn=right_buttons[3]; self.settings_btn=right_buttons[4]
         self.start_harvest_btn.setObjectName('btn_start'); self.stop_harvest_btn.setObjectName('btn_stop'); self.cancel_selected_btn.setObjectName('btn_cancel')
         self.cancel_all_btn.setObjectName('btn_cancel'); self.all_data_btn.setObjectName('btn_info'); self.settings_btn.setObjectName('btn_info')
         self.setStyleSheet(self.styleSheet() + """
@@ -207,6 +211,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 """)
         split.addWidget(left); split.addWidget(center); split.addWidget(cycle); split.addWidget(right); split.setStretchFactor(1, 3); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
+        self.logger.log('INFO', '[GUI] start button wired')
+
     def closeEvent(self, event):
         self._live_running = False
         if hasattr(self, '_status_timer') and self._status_timer:
@@ -582,7 +588,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def start_harvest(self):
         self.logger.log('INFO', '[GUI] START clicked')
-        self.logger.log('INFO', '[GUI] start button connected ok')
+        self.logger.log('INFO', f'[GUI] button object={id(self.start_harvest_btn)} enabled={self.start_harvest_btn.isEnabled()} visible={self.start_harvest_btn.isVisible()}')
         self.logger.log('INFO', '[LIVE] start clicked')
         if not self._private_ok:
             self.logger.log('RISK', '[RISK] blocked: not connected')
