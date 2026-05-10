@@ -997,13 +997,27 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             inv = self._inventory_metrics()
             inv_mode, inv_risk, _ = self._inventory_risk_state(inv['ratio'])
             risk_state = inv_risk if inv_risk else 'OK'
+            exit_only_mode = risk_state in ('HEAVY', 'DANGER')
+            if exit_only_mode:
+                self._log_throttled('exit_only_mode', f'[EXIT] mode active risk={risk_state}', 7.0)
             available_buy_usdt = Decimal(str(self._balances.get('QUOTE_free', 0)))
             buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10))) * inv['buy_mult']
             min_buy_free = Decimal(str(self.cfg.get('min_buy_free_usdt', 5.0)))
-            buy_allowed = inv_risk not in ('HEAVY', 'DANGER') and not (c.sell_order_id and inv['ratio'] > Decimal(str(self.cfg.get('target_inventory_ratio', 0.5))))
+            buy_allowed = (not exit_only_mode) and not (c.sell_order_id and inv['ratio'] > Decimal(str(self.cfg.get('target_inventory_ratio', 0.5))))
+            if exit_only_mode and c.buy_order_id:
+                try:
+                    self.orders.cancel(c.buy_order_id)
+                except Exception:
+                    self.logger.log('INFO', '[RUNTIME] cancel race ignored')
+                self._quote_birth.pop(c.buy_order_id, None)
+                c.buy_order_id = None
+                self._active_buy_order_id = None
+                self._pending_buy_order = None
+                self._pending_buy_grace_until = 0.0
+                self.logger.log('INFO', '[EXIT] buy cancelled')
             if net_inv < max_long and available_buy_usdt >= max(min_buy_free, buy_quote):
                 if not buy_allowed:
-                    if inv_risk in ('HEAVY', 'DANGER'):
+                    if exit_only_mode:
                         self.logger.log('RISK', 'buy blocked: inventory heavy')
                     else:
                         self.logger.log('INFO', '[BUY] skipped: exit priority')
@@ -1219,12 +1233,24 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             else:
                                 self.logger.log('INFO', '[SELL] resize up skipped insufficient new free inventory')
                     if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
-                        sell_qty = floor_to_step(min(exchange_free_euri, target_sell_qty), step)
+                        sell_qty = floor_to_step(exchange_free_euri if exit_only_mode else min(exchange_free_euri, target_sell_qty), step)
                         if sell_qty < min_qty:
                             self.logger.log('INFO', '[SELL] skipped: no free inventory after refresh')
                         elif sell_qty > 0:
                             min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
-                            self.logger.log('INFO', '[EXIT] unload mode') if risk_state in ('HEAVY', 'DANGER') else None
+                            if exit_only_mode:
+                                sell_age = max(0, time.time() - self._sell_started_at) if self._sell_started_at else 0
+                                emergency_loss_ticks = Decimal(str(self.cfg.get('emergency_loss_ticks', 50) or 50))
+                                emergency_floor = c.buy_avg_price - (emergency_loss_ticks * tick)
+                                if sell_age >= 60:
+                                    min_exit = max(ask - (Decimal(str(self.cfg.get('exit_aggr_ticks', 0))) * tick), emergency_floor)
+                                    self.logger.log('INFO', f'[EXIT] emergency unload target={min_exit}')
+                                elif sell_age >= 30:
+                                    min_exit = c.buy_avg_price
+                                    self.logger.log('INFO', '[EXIT] relax target=breakeven')
+                                elif sell_age >= 15:
+                                    min_exit = c.buy_avg_price + tick
+                                    self.logger.log('INFO', '[EXIT] relax target=breakeven+1')
                             self.logger.log('INFO', f'[SELL] TP protected qty={sell_qty} price={min_exit}') if ask < min_exit else None
                             try:
                                 resp = self._place_safe_maker_sell(sell_qty, min_exit, reason='run_live_cycle')
@@ -1259,25 +1285,26 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         working_price = Decimal(str(os.get('price') or ask))
                         min_reprice_ticks = Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
                         min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
+                        if exit_only_mode:
+                            sell_age = max(0, time.time() - self._sell_started_at) if c.sell_order_id else 0
+                            emergency_loss_ticks = Decimal(str(self.cfg.get('emergency_loss_ticks', 50) or 50))
+                            emergency_floor = c.buy_avg_price - (emergency_loss_ticks * tick)
+                            if sell_age >= 60:
+                                min_exit = max(ask - (Decimal(str(self.cfg.get('exit_aggr_ticks', 0))) * tick), emergency_floor)
+                                self.logger.log('INFO', f'[EXIT] emergency unload target={min_exit}')
+                            elif sell_age >= 30:
+                                min_exit = c.buy_avg_price
+                                self.logger.log('INFO', '[EXIT] relax target=breakeven')
+                            elif sell_age >= 15:
+                                min_exit = c.buy_avg_price + tick
+                                self.logger.log('INFO', '[EXIT] relax target=breakeven+1')
                         protected_ask = max(ask, min_exit)
                         tick_move = abs(protected_ask - working_price) / tick if tick > 0 else Decimal('0')
                         quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
                         min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
                         if ask < min_exit:
-                            sell_age = max(0, time.time() - self._sell_started_at) if c.sell_order_id else 0
-                            relax_after = int(self.cfg.get('inventory_unload_relax_after_sec', 20) or 20)
-                            mode, risk_state, _ = self._inventory_risk_state(inv['ratio'])
-                            if risk_state in ('HEAVY', 'DANGER') and sell_age >= relax_after:
-                                if ask >= c.buy_avg_price + tick:
-                                    self.logger.log('INFO', '[EXIT] TP relax to breakeven+1')
-                                    protected_ask = max(ask, c.buy_avg_price + tick)
-                                else:
-                                    self.logger.log('INFO', '[EXIT] TP relax to breakeven')
-                                    protected_ask = max(ask, c.buy_avg_price)
-                            else:
-                                self.logger.log('INFO', '[SELL] TP protected')
-                                self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
-                                pass
+                            self.logger.log('INFO', '[SELL] TP protected')
+                            self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
                         elif available_sell_qty > Decimal('0') and protected_ask != working_price and protected_ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
                             if working_price >= min_exit and protected_ask < working_price:
                                 self.logger.log('INFO', '[SELL] TP protected')
