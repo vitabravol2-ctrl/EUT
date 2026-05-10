@@ -812,6 +812,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def _on_buy_fill(self, qty: Decimal, price: Decimal):
         event = self._trade_ledger.record_buy(qty, price, fee=Decimal('0'), timestamp=time.time())
         self.logger.log('INFO', f'[BUY] qty={qty:.8f} price={price:.8f} spent={event["quote"]:.8f}')
+        self.logger.log('INFO', f'[CYCLE] BUY_FILLED qty={qty:.8f} avg={self._cycle.buy_avg_price:.8f} -> SELL_TARGET')
         self._refresh_trade_stats_from_ledger()
         snap = self._trade_ledger.snapshot()
         self.logger.log('INFO', f'[LEDGER] snapshot pnl={snap["realized_pnl"]:.8f} trades={snap["completed_cycles"]} open={snap["open_position_qty"]:.8f}')
@@ -926,7 +927,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             ('cs_inventory_sell_qty', self.cs_inventory_sell_qty, f"{s['inventory_sell_qty']:.8f}"),
         ]
         for key, label, value in updates:
-            self._safe_label_set(label, value, key=key)
+            self._safe_label_set(label, value)
         self._set_pnl_color(self.ts_realized, s['realized_pnl'])
         self._set_pnl_color(self.ts_portfolio_pnl, portfolio_pnl)
         self._set_pnl_color(self.ts_unrealized, unrealized)
@@ -1466,6 +1467,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self._ui_model_set('cs_inv_exposure', '-')
                 min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
                 min_sell_free = min_qty if min_qty > 0 else Decimal(str(self.cfg.get('min_sell_free_euri', 1.0)))
+                enable_inventory_cleanup = bool(self.cfg.get('enable_inventory_cleanup', False))
                 if available_sell_qty <= Decimal('0') and not c.sell_order_id:
                     self._ui_model_set('cs_top_ask_status', 'NO BTC TO SELL')
                     self.logger.log('INFO', '[SELL] disabled no exchange inventory')
@@ -1498,7 +1500,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                     c.state = CycleState.WAIT_READY
                                     self._exit_buy_disabled_logged = False
                                     self._sl_pending_started_mono = 0.0
-                                    self.logger.log('INFO', '[CYCLE] SELL_FILLED -> FLAT')
+                                    snap = self._trade_ledger.snapshot()
+                                    self.logger.log('INFO', f'[CYCLE] CLOSED pnl={snap.get("last_closed_trade_pnl", Decimal("0")):+.8f} -> FLAT ready')
                                 # GUI updates are timer-driven only (SELL branch).
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                                 # GUI updates are timer-driven only (SELL branch).
@@ -1536,7 +1539,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         active_sell_remaining_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
                     sell_capacity_total = floor_to_step(exchange_free_euri + active_sell_remaining_qty, step)
                     exposure_target_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
-                    target_sell_qty = min(sell_capacity_total, exposure_target_qty)
+                    target_sell_qty = min(floor_to_step(max(Decimal('0'), c.open_position_qty), step), exposure_target_qty) if has_open_position else Decimal('0')
                     capacity_signature = (str(exchange_free_euri), str(active_sell_remaining_qty), str(target_sell_qty))
                     if capacity_signature != self._sell_capacity_signature:
                         self.logger.log('INFO', f'[SELL] capacity total free={exchange_free_euri} active_remaining={active_sell_remaining_qty} total={sell_capacity_total}')
@@ -1596,7 +1599,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             else:
                                 self.logger.log('INFO', '[SELL] resize up skipped insufficient new free inventory')
                     if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
-                        if not has_open_position and exchange_free_euri > min_qty_runtime:
+                        if not has_open_position and exchange_free_euri > min_qty_runtime and enable_inventory_cleanup:
                             self._set_exit_reason('INVENTORY_CLEANUP')
                         elif exit_only_mode:
                             self._set_exit_reason('SL_EXIT')
@@ -1604,15 +1607,17 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._set_exit_reason('TP_EXIT')
                         sell_cap = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10) or 10))
                         if has_open_position:
-                            sell_qty = min(c.open_position_qty, floor_to_step(exchange_free_euri + active_sell_remaining_qty, step))
+                            sell_qty = floor_to_step(min(c.open_position_qty, exposure_target_qty), step)
                             mode = 'POSITION'
                         else:
-                            sell_qty = min(exchange_free_euri, floor_to_step(sell_cap / ask, step) if ask > 0 else Decimal('0'))
-                            mode = 'INVENTORY'
+                            sell_qty = min(exchange_free_euri, floor_to_step(sell_cap / ask, step) if ask > 0 else Decimal('0')) if enable_inventory_cleanup else Decimal('0')
+                            mode = 'INVENTORY_CLEANUP' if enable_inventory_cleanup else 'DISABLED'
                         sell_qty = floor_to_step(sell_qty, step)
                         self.logger.log('INFO', f'[SIZE] SELL qty={sell_qty:.8f} price={ask:.8f} cap={sell_cap:.8f} mode={mode}')
-                        if not has_open_position and exchange_free_euri > min_qty_runtime:
+                        if not has_open_position and exchange_free_euri > min_qty_runtime and enable_inventory_cleanup:
                             self.logger.log('INFO', '[INV] cleanup mode')
+                        elif not has_open_position and exchange_free_euri > min_qty_runtime and not enable_inventory_cleanup:
+                            self._log_throttled('inventory_cleanup_disabled', f'[INV] cleanup disabled qty={exchange_free_euri:.8f}', 10.0)
                         if sell_qty < min_qty:
                             self._log_throttled('block_sell_no_qty', '[BLOCK] sell reason=no_qty', 5.0)
                         elif sell_qty > 0:
