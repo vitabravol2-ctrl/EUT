@@ -141,8 +141,7 @@ class MainWindow(QMainWindow):
         self._last_live_tick_log_at = 0.0
         self._trade_ledger = TradeLedger()
         self._trade_stats = {}
-        self._refresh_trade_stats_from_ledger()
-        self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
+        self._init_services(); self._build_ui(); self._refresh_trade_stats_from_ledger(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
         self._status_timer=QTimer(self); self._status_timer.timeout.connect(self._tick_status); self._status_timer.start(300); QTimer.singleShot(50,self._startup_connect_flow)
