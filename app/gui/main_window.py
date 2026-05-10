@@ -91,7 +91,7 @@ class AllDataDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('EUT v0.3.9 — Operator Terminal'); self.setMinimumSize(1280,760); self.setStyleSheet(DARK_STYLESHEET); self.setFont(QFont('', APP_FONT_PT))
-        self.logger=AppLogger(max_records=500,dedupe_seconds=30); self.cfg=load_config(); self.runtime=RuntimeState(); self.ws=WSManager(enabled=False)
+        self.logger=AppLogger(max_records=500,dedupe_seconds=30); self.cfg=load_config(); self.runtime=RuntimeState(); self.ws=WSManager(enabled=True)
         self._last_market_snapshot={}; self._last_open_orders=[]; self._balances={}; self._status_badges={}; self._orders_by_id={}; self._selected_order_id=None; self._exchange_filters={}
         self._pair_config = get_pair_config(self.cfg.get('symbol', 'EURIUSDT'))
         self._spread_analyzer=SpreadStabilityAnalyzer(); self._queue_estimator=QueueQualityEstimator(); self._harvest_engine=HarvestReadinessEngine(); self._private_ok=False
@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
         cycle=QGroupBox('Runtime State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
         self.cs_inv_portfolio=QLabel('-'); self.cs_inv_base_value=QLabel('-'); self.cs_inv_quote_value=QLabel('-'); self.cs_inv_ratio=QLabel('-'); self.cs_inv_drift=QLabel('-')
         self.cs_trades=QLabel('0'); self.cs_winrate=QLabel('0.0%')
-        for n,w in [('ENGINE',self.cs_state),('BUY STATE',self.cs_buy_status),('SELL STATE',self.cs_sell_status),('BUY TOP',self.cs_top_bid_status),('SELL TOP',self.cs_top_ask_status),('BUY EXPOSURE',self.cs_avail_buy_usdt),('SELL EXPOSURE',self.cs_avail_sell_qty),(f"{self._pair_config.base_asset} Value",self.cs_inv_base_value),(f"{self._pair_config.quote_asset} Value",self.cs_inv_quote_value),(f"Inventory Ratio {self._pair_config.base_asset} / {self._pair_config.quote_asset}",self.cs_inv_ratio),('Inventory Drift',self.cs_inv_drift),('PnL',self.cs_pnl),('Trades',self.cs_trades),('Winrate',self.cs_winrate),('LAST FILL',self.cs_last_fill)]: cf.addRow(n,w)
+        for n,w in [('ENGINE',self.cs_state),('BUY STATE',self.cs_buy_status),('SELL STATE',self.cs_sell_status),('BUY TOP',self.cs_top_bid_status),('SELL TOP',self.cs_top_ask_status),(f"{self._pair_config.base_asset} Value",self.cs_inv_base_value),(f"{self._pair_config.quote_asset} Value",self.cs_inv_quote_value),(f"Inventory Ratio {self._pair_config.base_asset} / {self._pair_config.quote_asset}",self.cs_inv_ratio),('Inventory Drift',self.cs_inv_drift),('PnL',self.cs_pnl),('Trades',self.cs_trades),('Winrate',self.cs_winrate),('LAST FILL',self.cs_last_fill)]: cf.addRow(n,w)
         stats_box=QGroupBox('Trade Stats'); sf=QFormLayout(stats_box)
         self.ts_total=QLabel('0'); self.ts_buy_fills=QLabel('0'); self.ts_sell_fills=QLabel('0'); self.ts_cycles=QLabel('0'); self.ts_winrate=QLabel('0.0%'); self.ts_realized=QLabel('0.00000000'); self.ts_avg=QLabel('0.00000000'); self.ts_ticks=QLabel('0.00'); self.ts_fees=QLabel('0.00000000'); self.ts_runtime=QLabel('0s')
         self.ts_inventory_sells=QLabel('0'); self.ts_inventory_qty=QLabel('0.00000000'); self.ts_inventory_quote=QLabel('0.00000000')
@@ -176,7 +176,10 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
-    def _startup_connect_flow(self): self._load_exchange_filters(); self.refresh_market(True); self.refresh_balances(True); self.refresh_orders(True); self.start_polling()
+    def _startup_connect_flow(self):
+        self.logger.log('INFO', '[WS] connecting')
+        self.ws.connect()
+        self._load_exchange_filters(); self.refresh_market(True); self.refresh_balances(True); self.refresh_orders(True); self.start_polling()
     def open_settings(self): self.settings_dialog=SettingsDialog(self.cfg,self.apply_settings,self.test_connection,self); self.settings_dialog.show()
     def open_trade_settings(self): self.trade_settings_dialog=TradeSettingsDialog(self.cfg,self.apply_trade_settings,self); self.trade_settings_dialog.show()
     def open_manual_order(self): self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
@@ -289,6 +292,12 @@ class MainWindow(QMainWindow):
         if name=='market':
             self._last_market_snapshot=dict(payload)
             self._last_market_ts = time.time()
+            if self.ws.status.state != 'OK':
+                self.ws.mark_ok()
+                self.logger.log('INFO', '[WS] subscribed')
+                self.logger.log('INFO', '[WS] first tick')
+            else:
+                self.logger.log('INFO', '[WS] heartbeat ok')
             metrics=self._spread_engine.observe(Decimal(str(payload.get('bid',0))), Decimal(str(payload.get('ask',0))), float(payload.get('latency_ms',0)))
             self._spread_metrics=metrics
             self._set_label_text(self.ss_ticks, f"raw={metrics.snapshot.spread:.8f} | ticks={metrics.snapshot.spread_ticks:.2f}")
@@ -552,10 +561,7 @@ class MainWindow(QMainWindow):
                         self._pending_buy_order = None
                         self._pending_buy_grace_until = 0.0
                 if c.buy_order_id and c.buy_order_id not in open_order_ids and buy_grace_active:
-                    self.logger.log('INFO', '[BUY] grace window active')
-                    self.logger.log('INFO', '[BUY] waiting exchange visibility')
-                    self.logger.log('INFO', '[RUNTIME] BUY pending exchange visibility')
-                    self.logger.log('INFO', '[BUY] reconcile skipped (fresh order)')
+                    pass
                 elif c.buy_order_id and c.buy_order_id not in open_order_ids:
                     self.logger.log('INFO', '[BUY] lost, reconciling')
                 if should_clear_active_order(c.buy_order_id, buy_status, open_order_ids) and not buy_grace_active:
@@ -580,11 +586,16 @@ class MainWindow(QMainWindow):
                 else:
                     ob = self._orders_by_id.get(c.buy_order_id, {})
                     working_price = Decimal(str(ob.get('price') or bid))
-                    min_reprice_ticks = Decimal(str(self.cfg.get('minimum_reprice_ticks', 1)))
+                    min_reprice_ticks = Decimal(str(self.cfg.get('minimum_buy_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
                     tick_move = abs(bid - working_price) / tick if tick > 0 else Decimal('0')
                     quote_age_ms = int((time.time() - self._quote_birth.get(c.buy_order_id, 0.0)) * 1000) if c.buy_order_id else 0
                     min_quote_lifetime_ms = int(self.cfg.get('minimum_quote_lifetime_ms', 0) or 0)
-                    if bid != working_price and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
+                    if bid == working_price:
+                        self.cs_top_bid_status.setText('TOP')
+                        self.logger.log('INFO', '[BUY] already top')
+                    elif tick_move < min_reprice_ticks or quote_age_ms < min_quote_lifetime_ms:
+                        self.logger.log('INFO', '[BUY] reprice skipped noise')
+                    elif bid != working_price and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
                         self.cs_top_bid_status.setText('OUTBID')
                         self.logger.log('INFO', '[BUY] outbid')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
@@ -648,10 +659,7 @@ class MainWindow(QMainWindow):
                         self._pending_sell_order = None
                         self._pending_sell_grace_until = 0.0
                 if c.sell_order_id and c.sell_order_id not in open_order_ids and sell_grace_active:
-                    self.logger.log('INFO', '[SELL] grace window active')
-                    self.logger.log('INFO', '[SELL] waiting exchange visibility')
-                    self.logger.log('INFO', '[RUNTIME] SELL pending exchange visibility')
-                    self.logger.log('INFO', '[SELL] reconcile skipped (fresh order)')
+                    pass
                 elif c.sell_order_id and c.sell_order_id not in open_order_ids:
                     self.logger.log('INFO', '[RUNTIME] SELL vanished -> reconciled')
                     self.logger.log('INFO', '[RUNTIME] reconcile SELL')
@@ -683,13 +691,19 @@ class MainWindow(QMainWindow):
                     os = self._orders_by_id.get(c.sell_order_id, {})
                     working_price = Decimal(str(os.get('price') or ask))
                     working_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
+                    new_tp_price = floor_to_tick(max(ask, c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)), tick)
+                    same_price = abs(working_price - new_tp_price) < tick if tick > 0 else (working_price == new_tp_price)
+                    same_qty = abs(working_qty - target_sell_qty) < step if step > 0 else (working_qty == target_sell_qty)
+                    if same_price and same_qty:
+                        self.logger.log('INFO', '[SELL] TP unchanged')
+                        pass
                     qty_delta = abs(target_sell_qty - working_qty)
                     if target_sell_qty > 0 and ask == working_price and qty_delta < min_resize_delta:
                         pass
                         pass
-                    elif target_sell_qty > 0 and ask != working_price and (abs(ask - working_price) / tick if tick > 0 else Decimal('0')) >= Decimal(str(self.cfg.get('minimum_reprice_ticks', 1))):
+                    elif target_sell_qty > 0 and ask != working_price and (abs(ask - working_price) / tick if tick > 0 else Decimal('0')) >= Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1)))):
                         quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
-                        min_quote_lifetime_ms = int(self.cfg.get('minimum_quote_lifetime_ms', 0) or 0)
+                        min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
                         if quote_age_ms < min_quote_lifetime_ms:
                             pass
                         else:
@@ -730,7 +744,8 @@ class MainWindow(QMainWindow):
                     if sell_qty < min_qty:
                         self.logger.log('INFO', '[SELL] skipped: no free inventory after refresh')
                     elif sell_qty > 0:
-                        price = floor_to_tick(ask, tick)
+                        min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
+                        price = floor_to_tick(max(ask, min_exit), tick)
                         self.logger.log('INFO', f'[SELL] placing TP qty={sell_qty} ask={price}')
                         try:
                             resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
@@ -761,11 +776,17 @@ class MainWindow(QMainWindow):
                 else:
                     os = self._orders_by_id.get(c.sell_order_id, {})
                     working_price = Decimal(str(os.get('price') or ask))
-                    min_reprice_ticks = Decimal(str(self.cfg.get('minimum_reprice_ticks', 1)))
-                    tick_move = abs(ask - working_price) / tick if tick > 0 else Decimal('0')
+                    min_reprice_ticks = Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
+                    min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
+                    protected_ask = max(ask, min_exit)
+                    tick_move = abs(protected_ask - working_price) / tick if tick > 0 else Decimal('0')
                     quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
-                    min_quote_lifetime_ms = int(self.cfg.get('minimum_quote_lifetime_ms', 0) or 0)
-                    if available_sell_qty > Decimal('0') and ask != working_price and ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
+                    min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
+                    if ask < min_exit:
+                        self.logger.log('INFO', '[SELL] TP protected')
+                        self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
+                        self.logger.log('INFO', '[SELL] keep profitable TP')
+                    elif available_sell_qty > Decimal('0') and protected_ask != working_price and protected_ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
                         self.cs_top_ask_status.setText('UNDERCUT')
                         if self._sell_top_state == 'TOP':
                             self.logger.log('INFO', '[SELL] top lost')
@@ -773,7 +794,7 @@ class MainWindow(QMainWindow):
                         self.logger.log('INFO', '[SELL] undercut')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
                             self.cs_top_ask_status.setText('REPRICING')
-                            self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={ask}')
+                            self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={protected_ask}')
                             try:
                                 self.orders.cancel(c.sell_order_id)
                             except Exception as e:
@@ -828,14 +849,19 @@ class MainWindow(QMainWindow):
             return
         self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
         spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
-        self._data_mode = 'WS' if self.ws.status.state == 'OK' else 'REST'
         stale_timeout_ms = int(self.cfg.get('market_stale_ms', 3000) or 3000)
         market_age_ms = int((time.time() - self._last_market_ts) * 1000) if self._last_market_ts > 0 else 10**9
+        if market_age_ms > stale_timeout_ms:
+            if self.ws.status.state == 'OK':
+                self.logger.log('INFO', '[WS] stale')
+                self.logger.log('INFO', '[WS] reconnecting')
+            self.ws.mark_error('market stale')
+        self._data_mode = 'WS' if self.ws.status.state == 'OK' else 'REST'
         stale = market_age_ms > stale_timeout_ms
         data_status = 'DATA STALE' if stale else ('DATA WS OK' if self._data_mode == 'WS' else 'DATA REST OK')
         self._status_badges['DATA'].setText(data_status)
         if self._data_mode != self._last_data_mode:
-            self.logger.log('INFO', '[DATA] WS active' if self._data_mode == 'WS' else '[DATA] REST fallback')
+            self.logger.log('INFO', '[DATA] source=WS' if self._data_mode == 'WS' else '[DATA] source=REST')
             self._last_data_mode = self._data_mode
         self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if self._live_running else 'HARVEST IDLE')
         self._status_badges['ORDERS'].setText(f'ORDERS {len(self._last_open_orders)}'); self._status_badges['RISK'].setText(f"RISK {'BLOCKED' if self.cfg.get('risk_guard_enabled') else 'OK'}")
@@ -966,7 +992,8 @@ class MainWindow(QMainWindow):
         if group == 'Runtime':
             inv=self._inventory_metrics()
             pressure=self._pair_config.base_asset if inv['ratio']>Decimal(str(self.cfg.get('target_inventory_ratio',0.5))) else self._pair_config.quote_asset
-            return f"pair_profile={self._pair_config.profile}\nbase_asset={self._pair_config.base_asset}\nquote_asset={self._pair_config.quote_asset}\ncycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_quote={inv['portfolio']:.2f}\ninventory_ratio_{self._pair_config.base_asset.lower()}={inv['ratio']*100:.2f}%\ninventory_ratio_{self._pair_config.quote_asset.lower()}={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}\ntrades_total={self._trade_stats['total']}\ncompleted_cycles={self._trade_stats['cycles']}\nrealized_pnl={self._trade_stats['realized_pnl']:.8f}"
+            ws_age_ms = int((time.time() - self._last_market_ts) * 1000) if self._last_market_ts > 0 else -1
+            return f"pair_profile={self._pair_config.profile}\nbase_asset={self._pair_config.base_asset}\nquote_asset={self._pair_config.quote_asset}\ncycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_quote={inv['portfolio']:.2f}\ninventory_ratio_{self._pair_config.base_asset.lower()}={inv['ratio']*100:.2f}%\ninventory_ratio_{self._pair_config.quote_asset.lower()}={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}\ntrades_total={self._trade_stats['total']}\ncompleted_cycles={self._trade_stats['cycles']}\nrealized_pnl={self._trade_stats['realized_pnl']:.8f}\nws_connected={self.ws.status.state == 'OK'}\nws_last_tick_age_ms={ws_age_ms}\nws_tick_count={self.ws.status.tick_count}\nws_reconnects={self.ws.status.reconnects}\nlast_ws_error={self.ws.status.last_error}"
         if group == 'Orders':
             return '\n'.join([f"id={o.get('orderId')} side={o.get('side')} price={o.get('price')} qty={o.get('origQty')} exec={o.get('executedQty')} status={o.get('status')}" for o in self._last_open_orders]) or 'No open orders'
         if group == 'Execution':
