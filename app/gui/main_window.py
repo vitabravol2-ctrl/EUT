@@ -1154,6 +1154,69 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self.logger.log('ERROR', f'[ERROR] live cycle failed: {e}')
         self.logger.log('INFO', '[LIVE] tick after run_live_cycle')
 
+
+    def _run_two_state_chaser(self, bid: Decimal, ask: Decimal, tick: Decimal, step: Decimal, open_order_ids: set[int]) -> None:
+        c = self._cycle
+        min_qty = Decimal(str(self._exchange_filters.get('minQty', '0') or '0'))
+        snap = self._trade_ledger.snapshot()
+        pos_qty = floor_to_step(Decimal(str(snap.get('open_position_qty', Decimal('0')))), step)
+        c.open_position_qty = Decimal('0') if pos_qty <= min_qty else pos_qty
+        c.buy_avg_price = Decimal(str(snap.get('avg_open_buy', Decimal('0')))) if c.open_position_qty > min_qty else Decimal('0')
+
+        # Ignore old inventory when cleanup is disabled.
+        if (not bool(self.cfg.get('enable_inventory_cleanup', False))) and c.open_position_qty <= min_qty:
+            c.open_position_qty = Decimal('0')
+
+        if c.open_position_qty <= min_qty:
+            if c.sell_order_id:
+                try: self.orders.cancel(c.sell_order_id)
+                except Exception: pass
+                self._clear_sell_runtime_order(c.sell_order_id)
+            target_buy = self._safe_maker_buy_price(bid, ask, tick)
+            if c.buy_order_id and c.buy_order_id in open_order_ids:
+                row = self._orders_by_id.get(int(c.buy_order_id), {})
+                working = Decimal(str(row.get('price') or '0'))
+                if working != target_buy:
+                    try: self.orders.cancel(c.buy_order_id)
+                    except Exception: pass
+                    self._clear_buy_runtime_order(c.buy_order_id)
+            if not c.buy_order_id:
+                available_buy_usdt = Decimal(str(self._balances.get('QUOTE_free', 0) or 0))
+                qty = floor_to_step((available_buy_usdt / bid) if bid > 0 else Decimal('0'), step)
+                if qty > 0:
+                    resp = self._place_safe_maker_buy(qty, reason='two_state_chaser')
+                    if resp:
+                        c.buy_order_id = int(resp.get('orderId'))
+                        self._active_buy_order_id = c.buy_order_id
+            return
+
+        if c.buy_order_id:
+            try: self.orders.cancel(c.buy_order_id)
+            except Exception: pass
+            self._clear_buy_runtime_order(c.buy_order_id)
+
+        sell_qty = floor_to_step(c.open_position_qty, step)
+        if sell_qty <= 0:
+            return
+        tp_ticks = Decimal(str(self.cfg.get('take_profit_ticks', self.cfg.get('target_profit_ticks', 1)) or 1))
+        tp_price = c.buy_avg_price + (tp_ticks * tick)
+        target_sell = self._safe_maker_sell_price(tp_price, bid, ask, tick)
+        if c.sell_order_id and c.sell_order_id in open_order_ids:
+            row = self._orders_by_id.get(int(c.sell_order_id), {})
+            working_price = Decimal(str(row.get('price') or '0'))
+            orig = Decimal(str(row.get('origQty') or '0'))
+            exe = Decimal(str(row.get('executedQty') or '0'))
+            remaining = floor_to_step(max(Decimal('0'), orig - exe), step)
+            if working_price != target_sell or remaining != sell_qty:
+                try: self.orders.cancel(c.sell_order_id)
+                except Exception: pass
+                self._clear_sell_runtime_order(c.sell_order_id)
+        if not c.sell_order_id:
+            resp = self._place_safe_maker_sell(sell_qty, target_sell, reason='two_state_chaser')
+            if resp:
+                c.sell_order_id = int(resp.get('orderId'))
+                self._active_sell_order_id = c.sell_order_id
+
     def _run_live_cycle(self):
         self.logger.log('INFO', '[RUNTIME] cycle enter')
         c = self._cycle
@@ -1192,6 +1255,34 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             net_inv = c.net_inventory_euri
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
             self._reconcile_runtime_order_ids(open_order_ids)
+
+            # Simplified fast two-state chaser (NO_POSITION / POSITION_OPEN).
+            if self._cycle.buy_order_id and self._cycle.buy_order_id not in open_order_ids:
+                try:
+                    st = self.orders.order_status(self._cycle.buy_order_id)
+                    if safe_status(st) == 'FILLED':
+                        exec_qty = Decimal(str(st.get('executedQty', '0') or '0'))
+                        if exec_qty > 0:
+                            fill_price = Decimal(str(st.get('price') or bid))
+                            self._on_buy_fill(exec_qty, fill_price)
+                            self._clear_buy_runtime_order(self._cycle.buy_order_id)
+                except Exception:
+                    self._clear_buy_runtime_order(self._cycle.buy_order_id)
+            if self._cycle.sell_order_id and self._cycle.sell_order_id not in open_order_ids:
+                try:
+                    st = self.orders.order_status(self._cycle.sell_order_id)
+                    if safe_status(st) == 'FILLED':
+                        exec_qty = Decimal(str(st.get('executedQty', '0') or '0'))
+                        if exec_qty > 0:
+                            fill_price = self._extract_sell_fill_price(st, ask)
+                            self._on_sell_fill(exec_qty, fill_price)
+                            self._finalize_closed_position('SELL_FILLED', sell_order_id=self._cycle.sell_order_id)
+                            return
+                except Exception:
+                    self._clear_sell_runtime_order(self._cycle.sell_order_id)
+
+            self._run_two_state_chaser(bid=bid, ask=ask, tick=tick, step=step, open_order_ids=open_order_ids)
+            return
 
             now_mono = time.monotonic()
             buy_grace_active = c.buy_order_id and time.time() < self._pending_buy_grace_until
