@@ -45,6 +45,7 @@ DEFAULT_CONFIG = {
     'buy_max_age_ms': 5000,
     'entry_aggr_ticks': 0,
     'exit_aggr_ticks': 0,
+    'dynamic_aggression': False,
     'emergency_loss_ticks': 50,
     'stop_loss_ticks': 300,
     'max_aggr_spread_pct': 0.25,
