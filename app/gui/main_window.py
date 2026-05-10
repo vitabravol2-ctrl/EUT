@@ -125,6 +125,8 @@ class MainWindow(QMainWindow):
         self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
         self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0; self._cycle_started_at=time.time(); self._last_fill_time='-'
         self._log_throttle_until={}; self._runtime_label_cache={}; self._runtime_label_last_update=0.0
+        self._ui_model = {}
+        self._stale_label_warn_until = {}
         self._inventory_state='UNKNOWN'; self._inventory_color='#9e9e9e'; self._last_inventory_log_signature=None
         self._orders_live_last_refresh=0.0; self._balance_live_last_refresh=0.0; self._orders_live_interval_sec=1.0; self._balance_live_interval_sec=1.0
         self._orders_gui_last_sync=0.0; self._orders_gui_interval_sec=1.0
@@ -784,7 +786,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             if net_inv < max_long and available_buy_usdt >= max(min_buy_free, buy_quote):
                 if not buy_allowed:
                     if inv_risk in ('HEAVY', 'DANGER'):
-                        self.logger.log('RISK', '[RISK] buy blocked: inventory heavy')
+                        self.logger.log('RISK', 'buy blocked: inventory heavy')
                     else:
                         self.logger.log('INFO', '[BUY] skipped: exit priority')
                 buy_status = None
@@ -793,7 +795,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         try:
                             st = self.orders.order_status(c.buy_order_id)
                             buy_status = safe_status(st)
-                            self._safe_label_set(self.cs_buy_status, str(buy_status))
+                            self._ui_model_set('cs_buy_status', str(buy_status))
                             exec_qty = Decimal(str(st.get('executedQty', '0')))
                             delta = exec_qty - c.buy_filled_qty
                             if delta > 0:
@@ -835,7 +837,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self._pending_buy_grace_until = time.time() + self._order_visibility_grace_sec
                         self._buy_started_at = time.time()
                         self._quote_birth[c.buy_order_id] = time.time()
-                        self._safe_label_set(self.cs_top_bid_status, 'WORKING')
+                        self._ui_model_set('cs_top_bid_status', 'WORKING')
                 else:
                     ob = self._orders_by_id.get(c.buy_order_id, {})
                     working_price = Decimal(str(ob.get('price') or bid))
@@ -844,15 +846,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     quote_age_ms = int((time.time() - self._quote_birth.get(c.buy_order_id, 0.0)) * 1000) if c.buy_order_id else 0
                     min_quote_lifetime_ms = int(self.cfg.get('minimum_quote_lifetime_ms', 0) or 0)
                     if bid == working_price:
-                        self._safe_label_set(self.cs_top_bid_status, 'TOP')
+                        self._ui_model_set('cs_top_bid_status', 'TOP')
                         self.logger.log('INFO', '[BUY] already top')
                     elif tick_move < min_reprice_ticks or quote_age_ms < min_quote_lifetime_ms:
                         self.logger.log('INFO', f'[BUY] reprice skipped noise delta_ticks={int(tick_move)} min={int(min_reprice_ticks)}')
                     elif bid != working_price and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
-                        self._safe_label_set(self.cs_top_bid_status, 'OUTBID')
+                        self._ui_model_set('cs_top_bid_status', 'OUTBID')
                         self.logger.log('INFO', '[BUY] outbid')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
-                            self._safe_label_set(self.cs_top_bid_status, 'REPRICING')
+                            self._ui_model_set('cs_top_bid_status', 'REPRICING')
                             self.logger.log('INFO', f'[BUY] reposting best_bid old={working_price} new={bid}')
                             try:
                                 self.orders.cancel(c.buy_order_id)
@@ -863,7 +865,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self.logger.log('INFO', '[RUNTIME] repost continue')
                             self._last_reprice_at = time.time()
                     else:
-                        self._safe_label_set(self.cs_top_bid_status, 'TOP')
+                        self._ui_model_set('cs_top_bid_status', 'TOP')
                         if self._buy_top_state != 'TOP':
                             self.logger.log('INFO', '[BUY] top acquired')
                         self._buy_top_state = 'TOP'
@@ -877,14 +879,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
                 available_for_sell = floor_to_step(max(Decimal('0'), exchange_free_euri), step)
                 available_sell_qty = floor_to_step(max(Decimal('0'), exchange_free_euri), step)
-                self._safe_label_set(self.cs_avail_sell_qty, str(available_sell_qty))
-                self._safe_label_set(self.cs_pending_sell_qty, str(pending_sell_qty))
-                self._safe_label_set(self.cs_avail_buy_usdt, f"{available_buy_usdt:.2f}")
-                self._safe_label_set(self.cs_inv_exposure, '-')
+                self._ui_model_set('cs_avail_sell_qty', str(available_sell_qty))
+                self._ui_model_set('cs_pending_sell_qty', str(pending_sell_qty))
+                self._ui_model_set('cs_avail_buy_usdt', f"{available_buy_usdt:.2f}")
+                self._ui_model_set('cs_inv_exposure', '-')
                 min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
                 min_sell_free = min_qty if min_qty > 0 else Decimal(str(self.cfg.get('min_sell_free_euri', 1.0)))
                 if available_sell_qty <= Decimal('0') and not c.sell_order_id:
-                    self._safe_label_set(self.cs_top_ask_status, 'NO BTC TO SELL')
+                    self._ui_model_set('cs_top_ask_status', 'NO BTC TO SELL')
                     self.logger.log('INFO', '[SELL] disabled no exchange inventory')
                 elif net_inv > max_short and exchange_free_euri >= min_sell_free:
                     if not c.sell_order_id and c.buy_filled_qty > 0:
@@ -894,7 +896,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         try:
                             st = self.orders.order_status(c.sell_order_id)
                             sell_status = safe_status(st)
-                            self._safe_label_set(self.cs_sell_status, str(sell_status))
+                            self._ui_model_set('cs_sell_status', str(sell_status))
                             exec_qty = Decimal(str(st.get('executedQty', '0')))
                             delta = exec_qty - c.sell_filled_qty
                             if delta > 0:
@@ -1029,7 +1031,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._pending_sell_grace_until = time.time() + self._order_visibility_grace_sec
                             self._sell_started_at = time.time()
                             self._quote_birth[c.sell_order_id] = time.time()
-                            self._safe_label_set(self.cs_top_ask_status, 'WORKING')
+                            self._ui_model_set('cs_top_ask_status', 'WORKING')
                             self.logger.log('INFO', '[SELL] armed')
                             self._refresh_orders_live('sell_place', force=True)
                     else:
@@ -1061,13 +1063,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 self.logger.log('INFO', '[SELL] TP protected')
                                 self._sell_top_state = 'TOP'
                                 return
-                            self._safe_label_set(self.cs_top_ask_status, 'UNDERCUT')
+                            self._ui_model_set('cs_top_ask_status', 'UNDERCUT')
                             if self._sell_top_state == 'TOP':
                                 self.logger.log('INFO', '[SELL] top lost')
                             self._sell_top_state = 'UNDERCUT'
                             self.logger.log('INFO', '[SELL] undercut')
                             if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
-                                self._safe_label_set(self.cs_top_ask_status, 'REPRICING')
+                                self._ui_model_set('cs_top_ask_status', 'REPRICING')
                                 self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={protected_ask}')
                                 try:
                                     self.orders.cancel(c.sell_order_id)
@@ -1079,7 +1081,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 self.logger.log('INFO', '[RUNTIME] repost continue')
                                 self._last_reprice_at = time.time()
                         else:
-                            self._safe_label_set(self.cs_top_ask_status, 'TOP')
+                            self._ui_model_set('cs_top_ask_status', 'TOP')
                             if self._sell_top_state != 'TOP':
                                 self.logger.log('INFO', '[SELL] top acquired')
                             self._sell_top_state = 'TOP'
@@ -1092,6 +1094,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self.logger.log('ERROR', f'[LIVE] non-fatal runtime exception: {e}')
             self.logger.log('INFO', '[RUNTIME] reconcile BUY')
             self.logger.log('INFO', '[RUNTIME] reconcile SELL')
+
+
+    def _ui_model_set(self, key: str, value):
+        self._ui_model[key] = str(value)
 
     def _inventory_metrics(self):
         bid = Decimal(str(self._last_market_snapshot.get('bid', 0) or 0))
@@ -1145,6 +1151,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         try:
             self._update_status_strip()
             self._update_runtime_stats_panel()
+            self._apply_ui_model_to_widgets()
         except RuntimeError as exc:
             # Qt can fire one last timer tick while widgets are being torn down.
             # Stop the periodic callback to avoid noisy "C++ object already deleted" traces.
@@ -1211,13 +1218,38 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(False); self._update_harvest_button()
         self._paint_status()
 
-    def _safe_label_set(self, label: QLabel | None, text):
-        if label is None or not isValid(label):
-            return
+    def _apply_ui_model_to_widgets(self):
+        mapping = {
+            'cs_buy_status': self.cs_buy_status,
+            'cs_sell_status': self.cs_sell_status,
+            'cs_top_bid_status': self.cs_top_bid_status,
+            'cs_top_ask_status': self.cs_top_ask_status,
+            'cs_avail_sell_qty': self.cs_avail_sell_qty,
+            'cs_pending_sell_qty': self.cs_pending_sell_qty,
+            'cs_avail_buy_usdt': self.cs_avail_buy_usdt,
+            'cs_inv_exposure': self.cs_inv_exposure,
+        }
+        for key, value in list(self._ui_model.items()):
+            label = mapping.get(key)
+            if label is None:
+                continue
+            if not self._safe_label_set(label, value, key=key):
+                self._ui_model.pop(key, None)
+
+    def _safe_label_set(self, label: QLabel | None, text, key: str | None = None):
         try:
-            label.setText(str(text))
-        except RuntimeError as e:
-            self.logger.log('ERROR', f'stale QLabel skipped: {e}')
+            if label is not None and isValid(label):
+                label.setText(str(text))
+                return True
+        except RuntimeError:
+            pass
+        if key:
+            now = time.time()
+            until = self._stale_label_warn_until.get(key, 0.0)
+            if now >= until:
+                self.logger.log('WARNING', f'[GUI] stale label ignored key={key}')
+                self._stale_label_warn_until[key] = now + 30.0
+        return False
 
 
     def _set_label_text(self, label: QLabel | None, value: str):
