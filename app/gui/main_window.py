@@ -7,6 +7,7 @@ import time
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTextEdit
+from shiboken6 import isValid
 
 from app.core.account_service import AccountService
 from app.core.fill_observer import FillObserver, MarketActivity
@@ -155,6 +156,23 @@ class MainWindow(QMainWindow):
         self.start_harvest_btn=left_buttons[0]; self.stop_harvest_btn=left_buttons[1]; self.cancel_selected_btn=right.findChildren(QPushButton)[1]; self.cancel_all_btn=right.findChildren(QPushButton)[2]
         split.addWidget(left); split.addWidget(cycle); split.addWidget(center); split.addWidget(stats_box); split.addWidget(right); split.setStretchFactor(2, 3); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
+    def closeEvent(self, event):
+        self._live_running = False
+        if hasattr(self, '_status_timer') and self._status_timer:
+            self._status_timer.stop()
+        if hasattr(self, 'polling') and self.polling:
+            try:
+                self.polling.stop()
+            except Exception:
+                pass
+        try:
+            self.task_runner.signals.success.disconnect(self._on_task_success)
+            self.task_runner.signals.error.disconnect(self._on_task_error)
+            self.task_runner.signals.finished.disconnect(self.task_runner.finish)
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
     def _startup_connect_flow(self): self._load_exchange_filters(); self.refresh_market(True); self.refresh_balances(True); self.refresh_orders(True); self.start_polling()
     def open_settings(self): self.settings_dialog=SettingsDialog(self.cfg,self.apply_settings,self.test_connection,self); self.settings_dialog.show()
@@ -264,6 +282,8 @@ class MainWindow(QMainWindow):
         return changed
 
     def _on_task_success(self,name,payload):
+        if not isValid(self):
+            return
         if name=='market':
             self._last_market_snapshot=dict(payload)
             metrics=self._spread_engine.observe(Decimal(str(payload.get('bid',0))), Decimal(str(payload.get('ask',0))), float(payload.get('latency_ms',0)))
@@ -790,6 +810,8 @@ class MainWindow(QMainWindow):
         return {'portfolio':portfolio,'base_value':euri_value,'quote_value':usdt_total,'ratio':ratio,'drift':drift,'color':color,'buy_mult':max(Decimal('0.50'), buy_mult),'sell_mult':max(Decimal('0.50'), sell_mult)}
 
     def _tick_status(self):
+        if not isValid(self):
+            return
         self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
         spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
         self._data_mode = 'WS' if self.ws.status.state == 'OK' else 'REST'
@@ -818,6 +840,8 @@ class MainWindow(QMainWindow):
         self._paint_status()
         self._run_live_cycle()
     def _set_label_color(self, label: QLabel, color: str):
+        if label is None or not isValid(label):
+            return
         label.setStyleSheet(f'color: {color}; font-weight: 600;')
     def _paint_status(self):
         self._set_label_color(self._status_badges['CONNECTED'], '#4caf50' if self._private_ok else '#f44336')
