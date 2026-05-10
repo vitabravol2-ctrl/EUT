@@ -128,7 +128,6 @@ class MainWindow(QMainWindow):
         self._sell_capacity_signature=None; self._buy_top_state='UNKNOWN'; self._sell_top_state='UNKNOWN'
         self._quote_birth: dict[int, float] = {}
         self._data_mode = 'REST'
-        self._ui_state = {}
         self._last_data_mode = None
         self._last_market_ts = 0.0
         self._last_market_source = 'NONE'
@@ -192,7 +191,7 @@ class MainWindow(QMainWindow):
         self.manual_order_button = self._btn('Manual Order', self.open_manual_order)
         self.cancel_selected_button = self._btn('Cancel Selected', self.cancel_selected)
         self.cancel_all_button = self._btn('Cancel All', self.cancel_all)
-        self.all_data_button = self._btn('All Data', self.show_all_data)
+        self.all_data_button = self._btn('All Data', self.open_all_data)
         self.settings_button = self._btn('Settings', self.open_settings)
         for button in [self.manual_order_button, self.cancel_selected_button, self.cancel_all_button, self.all_data_button, self.settings_button]:
             rl.addWidget(button)
@@ -300,13 +299,16 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
         except Exception as e:
             self.logger.log('ERROR', f'[ERROR] GUI action failed action=MANUAL error={e}')
-    def show_all_data(self):
+    def open_all_data(self):
         try:
             self.logger.log('INFO', '[GUI] All Data clicked')
             self.all_data_dialog=AllDataDialog(self,self); self.all_data_dialog.show()
             self.logger.log('INFO', '[GUI] All Data opened')
         except Exception as e:
             self.logger.log('ERROR', f'[ERROR] All Data failed: {e}')
+
+    def show_all_data(self):
+        self.open_all_data()
     def apply_settings(self,v): self.cfg.update(v); save_config(self.cfg)
     def _build_fill_observer(self):
         fill_window_ms = int(self.cfg.get('fill_window_ms', self.cfg.get('min_stable_ms', 3000)))
@@ -620,15 +622,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         try:
             self.logger.log('INFO', '[GUI] START clicked')
             self.logger.log('INFO', f'[GUI] private_ok={self._private_ok} live={self._live_running}')
-            if not self._private_ok:
+            if not self._private_ok and not DEBUG_FORCE_START:
                 self.logger.log('RISK', '[RISK] blocked: not connected')
                 return
-            result = QMessageBox.question(self, 'LIVE Confirmation', 'Start LIVE harvest with real Binance orders?\nSmall test mode only.', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            self.logger.log('INFO', f'[GUI] confirmation result={result}')
-            if result != QMessageBox.Yes:
-                self.logger.log('INFO', '[GUI] confirmation no')
-                return
-            self.logger.log('INFO', '[GUI] confirmation yes')
+            if DEBUG_FORCE_START:
+                self.logger.log('INFO', '[GUI] DEBUG_FORCE_START direct runtime call')
             self._start_live_runtime()
         except Exception as e:
             self.logger.log('ERROR', f'[ERROR] GUI action failed action=START error={e}')
@@ -687,7 +685,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             if not ok:
                 now = time.time()
                 if now - self._last_wait_log_at >= 7:
-                    self.logger.log('INFO', f'[LIVE] waiting: {reason}')
+                    self.logger.log('INFO', f'[LIVE] waiting reason={reason}')
                     self._last_wait_log_at = now
                 return
             bid = Decimal(str(self._last_market_snapshot.get('bid', '0')))
@@ -1072,12 +1070,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         risk_blocked = bool(self._balances.get('risk_blocked', False))
         risk_enabled = bool(self.cfg.get('risk_guard_enabled'))
         risk_label = 'BLOCKED' if (risk_enabled and risk_blocked) else 'OK'
-        self._ui_state = {'connected': self._private_ok, 'data_source': self._data_mode, 'harvest_running': harvest_running, 'engine_state': engine_state, 'risk_state': risk_label, 'orders_count': len(self._last_open_orders), 'spread_state': spread}
-        self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._ui_state['connected'] else 'NO'}")
-        self._status_badges['SPREAD'].setText(f"SPREAD {self._ui_state['spread_state']}")
+        self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
+        self._status_badges['SPREAD'].setText(f"SPREAD {spread}")
         self._status_badges['DATA'].setText(data_status)
-        self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if self._ui_state['harvest_running'] else 'HARVEST IDLE')
-        self._status_badges['ORDERS'].setText(f"ORDERS {self._ui_state['orders_count']}"); self._status_badges['RISK'].setText(f"RISK {self._ui_state['risk_state']}")
+        self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if harvest_running else 'HARVEST IDLE')
+        self._status_badges['ORDERS'].setText(f"ORDERS {len(self._last_open_orders)}"); self._status_badges['RISK'].setText(f"RISK {risk_label}")
         self._status_balance_euri.setText(f"{self._pair_config.base_asset} {self._fmt_bal('BASE_free')} / locked {self._fmt_bal('BASE_locked')}")
         self._status_balance_usdt.setText(f"{self._pair_config.quote_asset} {self._fmt_bal('QUOTE_free')} / locked {self._fmt_bal('QUOTE_locked')}")
 
@@ -1092,7 +1089,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         cycles = max(1, self._trade_stats['cycles'])
         winrate = (Decimal(self._trade_stats['wins']) / Decimal(cycles) * Decimal('100')) if self._trade_stats['cycles'] > 0 else Decimal('0')
         avg = (self._trade_stats['realized_pnl'] / Decimal(cycles)) if self._trade_stats['cycles'] > 0 else Decimal('0')
-        self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._ui_state.get('data_source', self._data_mode)); self.cs_open_orders.setText(str(self._ui_state.get('orders_count', len(self._last_open_orders))))
+        self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders)))
         self.cs_trades.setText(str(self._trade_stats['total'])); self.cs_winrate.setText(f"{winrate:.2f}%"); self.cs_pnl.setText(f"{self._trade_stats['realized_pnl']:.8f}")
         self.start_harvest_btn.setEnabled(self._private_ok and not self._live_running); self.stop_harvest_btn.setEnabled(self._live_running)
         self._paint_status()
