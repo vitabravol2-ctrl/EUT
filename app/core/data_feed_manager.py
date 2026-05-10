@@ -11,6 +11,9 @@ class DataFeedPolicy:
     ws_stale_ms: int
     rest_validate_sec: int
     max_ws_rest_drift_ticks: int
+    ws_reconnect_cooldown_ms: int = 5000
+    ws_max_silent_misses: int = 3
+    source_switch_debounce_ms: int = 3000
 
 
 @dataclass
@@ -38,6 +41,10 @@ class DataFeedManager:
         self._last_validate_ts = 0.0
         self._ws_stale_forced = False
         self._fallback_reason = ''
+        self._silent_misses = 0
+        self._last_reconnect_attempt_ts = 0.0
+        self._active_source = 'REST'
+        self._source_switched_at = 0.0
 
     def update_ws(self, book: dict[str, Any], receive_time: float | None = None) -> None:
         self.ws_book = book
@@ -55,7 +62,24 @@ class DataFeedManager:
         if self._ws_stale_forced or not self.ws_book:
             return False
         age = self._age_ms(self.ws_ts)
-        return age >= 0 and age <= self.policy.ws_stale_ms
+        fresh = age >= 0 and age <= self.policy.ws_stale_ms
+        if fresh:
+            self._silent_misses = 0
+            return True
+        self._silent_misses += 1
+        return False
+
+    def should_reconnect_ws(self) -> bool:
+        if self.ws_fresh():
+            return False
+        if self._silent_misses < int(self.policy.ws_max_silent_misses):
+            return False
+        now = time.time()
+        cooldown = int(self.policy.ws_reconnect_cooldown_ms) / 1000.0
+        if (now - self._last_reconnect_attempt_ts) < cooldown:
+            return False
+        self._last_reconnect_attempt_ts = now
+        return True
 
     def maybe_validate(self) -> None:
         if not self.ws_book or not self.rest_book:
@@ -73,20 +97,18 @@ class DataFeedManager:
 
     def top_bid_ask(self) -> tuple[Decimal, Decimal, str]:
         self.maybe_validate()
-        if self.ws_fresh() and self.ws_book:
-            return (
-                Decimal(str(self.ws_book.get('bidPrice', 0) or 0)),
-                Decimal(str(self.ws_book.get('askPrice', 0) or 0)),
-                'WS',
-            )
+        preferred = 'WS' if self.ws_fresh() and self.ws_book else ('REST' if self.rest_book else 'NONE')
+        now = time.time()
+        debounce_sec = int(self.policy.source_switch_debounce_ms) / 1000.0
+        if preferred != self._active_source and (now - self._source_switched_at) >= debounce_sec:
+            self._active_source = preferred
+            self._source_switched_at = now
+        source = self._active_source if self._active_source in {'WS', 'REST'} else preferred
+        if source == 'WS' and self.ws_book:
+            return (Decimal(str(self.ws_book.get('bidPrice', 0) or 0)), Decimal(str(self.ws_book.get('askPrice', 0) or 0)), 'WS')
         if self.rest_book:
-            reason = self._fallback_reason or 'ws_stale'
-            self._fallback_reason = reason
-            return (
-                Decimal(str(self.rest_book.get('bidPrice', 0) or 0)),
-                Decimal(str(self.rest_book.get('askPrice', 0) or 0)),
-                'REST',
-            )
+            self._fallback_reason = self._fallback_reason or 'ws_stale'
+            return (Decimal(str(self.rest_book.get('bidPrice', 0) or 0)), Decimal(str(self.rest_book.get('askPrice', 0) or 0)), 'REST')
         return Decimal('0'), Decimal('0'), 'NONE'
 
     def diagnostics(self) -> DataFeedSnapshot:

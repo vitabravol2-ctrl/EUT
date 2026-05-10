@@ -110,8 +110,8 @@ class MainWindow(QMainWindow):
         self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0; self._cycle_started_at=time.time(); self._last_fill_time='-'
         self._log_throttle_until={}; self._runtime_label_cache={}; self._runtime_label_last_update=0.0
         self._inventory_state='UNKNOWN'; self._inventory_color='#9e9e9e'; self._last_inventory_log_signature=None
-        self._orders_live_last_refresh=0.0; self._balance_live_last_refresh=0.0; self._orders_live_interval_sec=1.5; self._balance_live_interval_sec=7.0
-        self._orders_gui_last_sync=0.0; self._orders_gui_interval_sec=2.5
+        self._orders_live_last_refresh=0.0; self._balance_live_last_refresh=0.0; self._orders_live_interval_sec=1.0; self._balance_live_interval_sec=1.0
+        self._orders_gui_last_sync=0.0; self._orders_gui_interval_sec=1.0
         self._sell_capacity_signature=None; self._buy_top_state='UNKNOWN'; self._sell_top_state='UNKNOWN'
         self._quote_birth: dict[int, float] = {}
         self._data_mode = 'REST'
@@ -524,7 +524,7 @@ class MainWindow(QMainWindow):
             max_long = Decimal(str(self.cfg.get('max_long_inventory_euri', 500)))
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
             net_inv = c.net_inventory_euri
-            self._log_throttled('runtime_dual_active', '[RUNTIME] dual-sided active', 45.0)
+            self._log_throttled('runtime_loop_active', '[RUNTIME] loop active', 10.0)
 
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
 
@@ -594,7 +594,7 @@ class MainWindow(QMainWindow):
                         self.cs_top_bid_status.setText('TOP')
                         self.logger.log('INFO', '[BUY] already top')
                     elif tick_move < min_reprice_ticks or quote_age_ms < min_quote_lifetime_ms:
-                        self.logger.log('INFO', '[BUY] reprice skipped noise')
+                        self.logger.log('INFO', f'[BUY] reprice skipped noise delta_ticks={int(tick_move)} min={int(min_reprice_ticks)}')
                     elif bid != working_price and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
                         self.cs_top_bid_status.setText('OUTBID')
                         self.logger.log('INFO', '[BUY] outbid')
@@ -771,7 +771,7 @@ class MainWindow(QMainWindow):
                         self._sell_started_at = time.time()
                         self._quote_birth[c.sell_order_id] = time.time()
                         self.cs_top_ask_status.setText('WORKING')
-                        self.logger.log('INFO', '[SELL] TP active')
+                        self.logger.log('INFO', '[SELL] armed')
                         self._refresh_orders_live('sell_place', force=True)
                 else:
                     os = self._orders_by_id.get(c.sell_order_id, {})
