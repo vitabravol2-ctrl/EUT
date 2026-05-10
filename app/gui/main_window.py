@@ -184,13 +184,14 @@ class MainWindow(QMainWindow):
         fl.addRow(self.start_button); fl.addRow(self.edit_settings_button)
         cycle=QGroupBox('Runtime / Stats'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
         self.cs_inv_portfolio=QLabel('-'); self.cs_inv_base_value=QLabel('-'); self.cs_inv_quote_value=QLabel('-'); self.cs_inv_ratio=QLabel('-'); self.cs_inv_drift=QLabel('-')
-        self.cs_trades=QLabel('0'); self.cs_winrate=QLabel('0.0%'); self.cs_data_source=QLabel('REST'); self.cs_open_orders=QLabel('0')
-        for n,w in [('ENGINE',self.cs_state),('DATA SOURCE',self.cs_data_source),('BUY STATE',self.cs_buy_status),('BUY TOP',self.cs_top_bid_status),('SELL STATE',self.cs_sell_status),('SELL TOP',self.cs_top_ask_status),('Inventory Drift',self.cs_inv_drift),('PnL',self.cs_pnl),('Trades',self.cs_trades),('Winrate',self.cs_winrate),('Open Orders',self.cs_open_orders),('Last Fill',self.cs_last_fill)]: cf.addRow(n,w)
+        self.cs_closed_trades=QLabel('0'); self.cs_winrate=QLabel('0.0%'); self.cs_data_source=QLabel('REST'); self.cs_open_orders=QLabel('0')
+        self.cs_realized_pnl=QLabel('0.00000000'); self.cs_unrealized_pnl=QLabel('0.00000000'); self.cs_total_pnl=QLabel('0.00000000'); self.cs_last_closed_pnl=QLabel('0.00000000'); self.cs_wins_losses=QLabel('0 / 0')
+        for n,w in [('ENGINE',self.cs_state),('DATA SOURCE',self.cs_data_source),('BUY STATE',self.cs_buy_status),('BUY TOP',self.cs_top_bid_status),('SELL STATE',self.cs_sell_status),('SELL TOP',self.cs_top_ask_status),('Inventory Drift',self.cs_inv_drift),('Realized PnL',self.cs_realized_pnl),('Unrealized PnL',self.cs_unrealized_pnl),('Total PnL',self.cs_total_pnl),('Closed trades',self.cs_closed_trades),('Winrate',self.cs_winrate),('Wins / Losses',self.cs_wins_losses),('Last closed trade PnL',self.cs_last_closed_pnl),('Open Orders',self.cs_open_orders),('Last Fill',self.cs_last_fill)]: cf.addRow(n,w)
         stats_box=QGroupBox('Trade Stats'); sf=QFormLayout(stats_box)
-        self.ts_total=QLabel('0'); self.ts_buy_fills=QLabel('0'); self.ts_sell_fills=QLabel('0'); self.ts_cycles=QLabel('0'); self.ts_winrate=QLabel('0.0%'); self.ts_realized=QLabel('0.00000000'); self.ts_avg=QLabel('0.00000000'); self.ts_ticks=QLabel('0.00'); self.ts_fees=QLabel('0.00000000'); self.ts_runtime=QLabel('0s')
+        self.ts_total=QLabel('0'); self.ts_buy_fills=QLabel('0'); self.ts_sell_fills=QLabel('0'); self.ts_closed_trades=QLabel('0'); self.ts_winrate=QLabel('0.0%'); self.ts_realized=QLabel('0.00000000'); self.ts_unrealized=QLabel('0.00000000'); self.ts_total_pnl=QLabel('0.00000000'); self.ts_avg=QLabel('0.00000000'); self.ts_ticks=QLabel('0.00'); self.ts_fees=QLabel('0.00000000'); self.ts_runtime=QLabel('0s')
         self.ts_bought_qty=QLabel('0.00000000'); self.ts_bought_quote=QLabel('0.00000000'); self.ts_sold_qty=QLabel('0.00000000'); self.ts_sold_quote=QLabel('0.00000000'); self.ts_matched_sold_qty=QLabel('0.00000000')
         self.ts_inventory_qty=QLabel('0.00000000'); self.ts_inventory_quote=QLabel('0.00000000'); self.ts_open_position_qty=QLabel('0.00000000'); self.ts_avg_buy_price=QLabel('0.00000000'); self.ts_avg_sell_price=QLabel('0.00000000')
-        for n,w in [('Trades total',self.ts_total),('BUY fills',self.ts_buy_fills),('SELL fills',self.ts_sell_fills),('Bought qty',self.ts_bought_qty),('Bought quote',self.ts_bought_quote),('Sold qty',self.ts_sold_qty),('Sold quote',self.ts_sold_quote),('Matched sold qty',self.ts_matched_sold_qty),('Inventory sold qty',self.ts_inventory_qty),('Inventory sold quote',self.ts_inventory_quote),('Open position qty',self.ts_open_position_qty),('Avg buy',self.ts_avg_buy_price),('Avg sell',self.ts_avg_sell_price),('Completed cycles',self.ts_cycles),('Winrate %',self.ts_winrate),('Realized PnL',self.ts_realized),('Avg profit / trade',self.ts_avg),('Spread captured ticks',self.ts_ticks),('Fees',self.ts_fees),('Session runtime',self.ts_runtime)]: sf.addRow(n,w)
+        for n,w in [('Fills total',self.ts_total),('BUY fills',self.ts_buy_fills),('SELL fills',self.ts_sell_fills),('Closed trades',self.ts_closed_trades),('Bought qty',self.ts_bought_qty),('Bought quote',self.ts_bought_quote),('Sold qty',self.ts_sold_qty),('Sold quote',self.ts_sold_quote),('Matched sold qty',self.ts_matched_sold_qty),('Inventory sold qty',self.ts_inventory_qty),('Inventory sold quote',self.ts_inventory_quote),('Open position qty',self.ts_open_position_qty),('Avg open buy',self.ts_avg_buy_price),('Avg sell',self.ts_avg_sell_price),('Winrate %',self.ts_winrate),('Realized PnL',self.ts_realized),('Unrealized PnL',self.ts_unrealized),('Total PnL',self.ts_total_pnl),('Avg profit / trade',self.ts_avg),('Spread captured ticks',self.ts_ticks),('Fees',self.ts_fees),('Session runtime',self.ts_runtime)]: sf.addRow(n,w)
         center=QGroupBox('Open Orders'); cl=QVBoxLayout(center); self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(['side','price','qty','filled','remain','age','top-status']); self.table.itemSelectionChanged.connect(self._on_order_selected); self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); cl.addWidget(self.table); self.no_orders=QLabel('No open orders'); cl.addWidget(self.no_orders)
         spread_box=QGroupBox('Spread Stability'); sl=QFormLayout(spread_box)
         self.ss_ticks=QLabel('-'); self.ss_lifetime=QLabel('-'); self.ss_bid=QLabel('-'); self.ss_ask=QLabel('-'); self.ss_ratio=QLabel('-'); self.ss_collapse=QLabel('0')
@@ -629,7 +630,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def _on_buy_fill(self, qty: Decimal, price: Decimal):
         event = self._trade_ledger.record_buy(qty, price, fee=Decimal('0'), timestamp=time.time())
-        self.logger.log('INFO', f'[LEDGER] BUY qty={qty:.8f} price={price:.8f} quote={event["quote"]:.8f} open_lots={event["open_lots"]}')
+        self.logger.log('INFO', f'[BUY] qty={qty:.8f} price={price:.8f} spent={event["quote"]:.8f}')
         self._refresh_trade_stats_from_ledger()
         snap = self._trade_ledger.snapshot()
         self.logger.log('INFO', f'[LEDGER] snapshot pnl={snap["realized_pnl"]:.8f} trades={snap["completed_cycles"]} open={snap["open_position_qty"]:.8f}')
@@ -638,7 +639,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
         result = self._trade_ledger.record_sell(qty, price, fee=self._ledger_fee_rate(), tick_size=tick, timestamp=time.time())
         if result['matched_qty'] > 0:
-            self.logger.log('INFO', f'[TRADE] completed qty={result["matched_qty"]:.8f} buy_avg={result["avg_buy"]:.8f} sell={price:.8f} pnl={result["realized"]:.8f} ticks={result["ticks"]:.2f}')
+            self.logger.log('INFO', f'[TRADE] CLOSED qty={result["matched_qty"]:.8f} buy_avg={result["avg_buy"]:.8f} sell={price:.8f} pnl={result["realized"]:+.8f} ticks={result["ticks"]:.2f}')
             self.logger.log('INFO', f'[PNL] realized={result["realized"]:.8f} total={self._trade_ledger.realized_pnl:.8f}')
         if result['inventory_qty'] > 0:
             self.logger.log('INFO', f'[INV_SELL] qty={result["inventory_qty"]:.8f} quote={result["inventory_quote"]:.8f}')
@@ -663,8 +664,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def _update_runtime_stats_from_ledger(self):
         s = self._trade_ledger.snapshot()
-        cycles = max(1, s['completed_cycles'])
-        avg = (s['realized_pnl'] / Decimal(cycles)) if s['completed_cycles'] > 0 else Decimal('0')
+        bid = Decimal(str(self._last_market_snapshot.get('bid', '0') if self._last_market_snapshot else '0'))
+        unrealized = s['open_position_qty'] * (bid - s.get('avg_open_buy', Decimal('0'))) if s['open_position_qty'] > 0 and bid > 0 else Decimal('0')
+        total_pnl = s['realized_pnl'] + unrealized
+        closed_trades = int(s.get('closed_trades', s.get('completed_cycles', 0)) or 0)
+        cycles = max(1, closed_trades)
+        avg = (s['realized_pnl'] / Decimal(cycles)) if closed_trades > 0 else Decimal('0')
         updates = [
             ('ts_total', self.ts_total, str(s['total_fills'])),
             ('ts_buy_fills', self.ts_buy_fills, str(s['buy_fills'])),
@@ -672,10 +677,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             ('ts_bought_qty', self.ts_bought_qty, f"{s['total_buy_qty']:.8f}"),
             ('ts_sold_qty', self.ts_sold_qty, f"{s['total_sell_qty']:.8f}"),
             ('ts_open_position_qty', self.ts_open_position_qty, f"{s['open_position_qty']:.8f}"),
-            ('ts_avg_buy_price', self.ts_avg_buy_price, f"{s['avg_buy']:.8f}"),
+            ('ts_avg_buy_price', self.ts_avg_buy_price, f"{s.get('avg_open_buy', Decimal('0')):.8f}"),
             ('ts_avg_sell_price', self.ts_avg_sell_price, f"{s['avg_sell']:.8f}"),
             ('ts_realized', self.ts_realized, f"{s['realized_pnl']:.8f}"),
-            ('ts_cycles', self.ts_cycles, str(s['completed_cycles'])),
+            ('ts_unrealized', self.ts_unrealized, f"{unrealized:.8f}"),
+            ('ts_total_pnl', self.ts_total_pnl, f"{total_pnl:.8f}"),
+            ('ts_closed_trades', self.ts_closed_trades, str(closed_trades)),
             ('ts_winrate', self.ts_winrate, f"{s['winrate']:.2f}%"),
             ('ts_fees', self.ts_fees, f"{s['fees']:.8f}"),
             ('ts_avg', self.ts_avg, f"{avg:.8f}"),
@@ -685,12 +692,32 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             ('ts_inventory_qty', self.ts_inventory_qty, f"{s['inventory_sell_qty']:.8f}"),
             ('ts_inventory_quote', self.ts_inventory_quote, f"{s['inventory_sell_quote']:.8f}"),
             ('ts_ticks', self.ts_ticks, f"{s['spread_captured_ticks_total']:.2f}"),
-            ('cs_trades', self.cs_trades, str(s['total_fills'])),
+            ('cs_closed_trades', self.cs_closed_trades, str(closed_trades)),
             ('cs_winrate', self.cs_winrate, f"{s['winrate']:.2f}%"),
-            ('cs_pnl', self.cs_pnl, f"{s['realized_pnl']:.8f}"),
+            ('cs_realized_pnl', self.cs_realized_pnl, f"{s['realized_pnl']:.8f}"),
+            ('cs_unrealized_pnl', self.cs_unrealized_pnl, f"{unrealized:.8f}"),
+            ('cs_total_pnl', self.cs_total_pnl, f"{total_pnl:.8f}"),
+            ('cs_last_closed_pnl', self.cs_last_closed_pnl, f"{s.get('last_closed_trade_pnl', Decimal('0')):.8f}"),
+            ('cs_wins_losses', self.cs_wins_losses, f"{s.get('wins', 0)} / {s.get('losses', 0)}"),
         ]
         for key, label, value in updates:
             self._safe_label_set(label, value, key=key)
+        self._set_pnl_color(self.ts_realized, s['realized_pnl'])
+        self._set_pnl_color(self.ts_unrealized, unrealized)
+        self._set_pnl_color(self.ts_total_pnl, total_pnl)
+        self._set_pnl_color(self.cs_realized_pnl, s['realized_pnl'])
+        self._set_pnl_color(self.cs_unrealized_pnl, unrealized)
+        self._set_pnl_color(self.cs_total_pnl, total_pnl)
+        self._set_pnl_color(self.cs_last_closed_pnl, s.get('last_closed_trade_pnl', Decimal('0')))
+        self._set_pnl_color(self.cs_winrate, s['winrate'] - Decimal('50'))
+
+    def _set_pnl_color(self, label: QLabel, value: Decimal):
+        color = '#9e9e9e'
+        if value > 0:
+            color = '#2ecc71'
+        elif value < 0:
+            color = '#ff5c5c'
+        label.setStyleSheet(f'color: {color};')
 
     def _risk_ok(self) -> tuple[bool, str]:
         if not self.cfg.get('trading_enabled', False):
