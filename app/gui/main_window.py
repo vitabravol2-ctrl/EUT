@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
         max_reprice_per_sec = float(self.cfg.get('max_reprice_per_sec', 0) or 0)
         self._reprice_throttle_sec=(1.0 / max_reprice_per_sec) if max_reprice_per_sec > 0 else self._pair_config.top_check_interval_sec
         self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
-        self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0; self._cycle_started_at=time.time(); self._last_fill_time='-'
+        self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0; self._cycle_started_at=time.time(); self._last_fill_time='-'; self._cycle_started_mono=time.monotonic()
         self._log_throttle_until={}; self._runtime_label_cache={}; self._runtime_label_last_update=0.0
         self._ui_model = {}
         self._stale_label_warn_until = {}
@@ -135,6 +135,8 @@ class MainWindow(QMainWindow):
         self._orders_gui_last_sync=0.0; self._orders_gui_interval_sec=1.0
         self._sell_capacity_signature=None; self._buy_top_state='UNKNOWN'; self._sell_top_state='UNKNOWN'; self._exit_buy_disabled_logged=False
         self._quote_birth: dict[int, float] = {}
+        self._quote_birth_mono: dict[int, float] = {}
+        self._exit_reason = 'NONE'
         self._buy_repost_next_tick = False
         self._data_mode = 'REST'
         self._last_data_mode = None
@@ -653,18 +655,18 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self._reconcile_runtime_order_ids(open_ids)
         if self._active_buy_order_id and self._active_buy_order_id not in open_ids:
             self.logger.log('INFO', f'[RUNTIME] active BUY resolved id={self._active_buy_order_id}')
-            self._quote_birth.pop(self._active_buy_order_id, None)
+            self._quote_birth.pop(self._active_buy_order_id, None); self._quote_birth_mono.pop(self._active_buy_order_id, None)
             self._active_buy_order_id=None
         if self._active_sell_order_id and self._active_sell_order_id not in open_ids and now >= self._pending_sell_grace_until:
             self.logger.log('INFO', f'[RUNTIME] active SELL resolved id={self._active_sell_order_id}')
-            self._quote_birth.pop(self._active_sell_order_id, None)
+            self._quote_birth.pop(self._active_sell_order_id, None); self._quote_birth_mono.pop(self._active_sell_order_id, None)
             self._active_sell_order_id=None
             self._pending_sell_order=None
 
     def _clear_buy_runtime_order(self, stale_id=None):
         stale = stale_id if stale_id is not None else self._cycle.buy_order_id
         if stale is not None:
-            self._quote_birth.pop(stale, None)
+            self._quote_birth.pop(stale, None); self._quote_birth_mono.pop(stale, None)
             self._optimistic_orders.pop(stale, None)
         self._cycle.buy_order_id = None
         self._active_buy_order_id = None
@@ -674,7 +676,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def _clear_sell_runtime_order(self, stale_id=None):
         stale = stale_id if stale_id is not None else self._cycle.sell_order_id
         if stale is not None:
-            self._quote_birth.pop(stale, None)
+            self._quote_birth.pop(stale, None); self._quote_birth_mono.pop(stale, None)
             self._optimistic_orders.pop(stale, None)
         self._cycle.sell_order_id = None
         self._active_sell_order_id = None
@@ -1108,7 +1110,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 buy_price = Decimal(str(buy_row.get('price') or bid))
                 stale_ticks = max(int(self.cfg.get('entry_aggr_ticks', 0) or 0), int(self.cfg.get('buy_stale_reprice_ticks', 10) or 10))
                 delta_ticks = abs(bid - buy_price) / tick if tick > 0 else Decimal('0')
-                buy_age_ms = int((time.time() - self._quote_birth.get(c.buy_order_id, 0.0)) * 1000)
+                buy_age_ms = self._order_age_ms(c.buy_order_id)
                 buy_max_age_ms = int(self.cfg.get('buy_max_age_ms', 8000) or 8000)
                 if (tick > 0 and delta_ticks > Decimal(stale_ticks)) or buy_age_ms > buy_max_age_ms:
                     stale_buy_id = c.buy_order_id
@@ -1155,7 +1157,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     self.orders.cancel(c.buy_order_id)
                 except Exception:
                     self.logger.log('INFO', '[RUNTIME] cancel race ignored')
-                self._quote_birth.pop(c.buy_order_id, None)
+                self._quote_birth.pop(c.buy_order_id, None); self._quote_birth_mono.pop(c.buy_order_id, None)
                 c.buy_order_id = None
                 self._active_buy_order_id = None
                 self._pending_buy_order = None
@@ -1205,7 +1207,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                         self.orders.cancel(c.buy_order_id)
                                     except Exception:
                                         self.logger.log('INFO', '[RUNTIME] cancel race ignored')
-                                    self._quote_birth.pop(c.buy_order_id, None)
+                                    self._quote_birth.pop(c.buy_order_id, None); self._quote_birth_mono.pop(c.buy_order_id, None)
                                     c.buy_order_id = None
                                     self._active_buy_order_id = None
                                     self._pending_buy_order = None
@@ -1243,13 +1245,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self._remember_optimistic_order(c.buy_order_id, 'BUY')
                         self._buy_started_at = time.time()
                         self._quote_birth[c.buy_order_id] = time.time()
+                        self._quote_birth_mono[c.buy_order_id] = time.monotonic()
                         self._ui_model_set('cs_top_bid_status', 'WORKING')
                 elif buy_allowed:
                     ob = self._orders_by_id.get(c.buy_order_id, {})
                     working_price = Decimal(str(ob.get('price') or bid))
                     min_reprice_ticks = Decimal(str(self.cfg.get('minimum_buy_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
                     tick_move = abs(bid - working_price) / tick if tick > 0 else Decimal('0')
-                    quote_age_ms = int((time.time() - self._quote_birth.get(c.buy_order_id, 0.0)) * 1000) if c.buy_order_id else 0
+                    quote_age_ms = self._order_age_ms(c.buy_order_id)
                     min_quote_lifetime_ms = int(self.cfg.get('minimum_quote_lifetime_ms', 0) or 0)
                     if bid == working_price:
                         self._ui_model_set('cs_top_bid_status', 'TOP')
@@ -1287,7 +1290,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     self.orders.cancel(c.buy_order_id)
                 except Exception:
                     self.logger.log('INFO', '[RUNTIME] cancel race ignored')
-                self._quote_birth.pop(c.buy_order_id, None)
+                self._quote_birth.pop(c.buy_order_id, None); self._quote_birth_mono.pop(c.buy_order_id, None)
                 c.buy_order_id = None
                 self._active_buy_order_id = None
                 self._pending_buy_order = None
@@ -1295,16 +1298,18 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self.logger.log('INFO', f'[BUY] cancelled in mode={position_mode}')
 
             if sl_triggered:
+                self._set_exit_reason('SL_EXIT')
                 position_mode = 'EXIT_SL'
                 exit_only_mode = True
                 if c.state != CycleState.EXIT_PENDING:
+                    self._set_exit_reason('SL_EXIT')
                     c.transition(CycleState.EXIT_PENDING, 'EXIT_SL')
                 if c.buy_order_id:
                     try:
                         self.orders.cancel(c.buy_order_id)
                     except Exception:
                         self.logger.log('INFO', '[RUNTIME] cancel race ignored')
-                    self._quote_birth.pop(c.buy_order_id, None)
+                    self._quote_birth.pop(c.buy_order_id, None); self._quote_birth_mono.pop(c.buy_order_id, None)
                     c.buy_order_id = None
                     self._active_buy_order_id = None
                     self._pending_buy_order = None
@@ -1417,14 +1422,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             pass
                             pass
                         elif target_sell_qty > 0 and ask != working_price and (abs(ask - working_price) / tick if tick > 0 else Decimal('0')) >= Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1)))):
-                            quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
+                            quote_age_ms = self._order_age_ms(c.sell_order_id)
                             min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
                             if quote_age_ms < min_quote_lifetime_ms:
                                 pass
                             else:
                                 self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={ask}')
                                 self.orders.cancel(c.sell_order_id)
-                                self._quote_birth.pop(c.sell_order_id, None)
+                                self._quote_birth.pop(c.sell_order_id, None); self._quote_birth_mono.pop(c.sell_order_id, None)
                                 c.sell_order_id = None
                                 self._active_sell_order_id = None
                                 self._pending_sell_order = None
@@ -1455,6 +1460,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             else:
                                 self.logger.log('INFO', '[SELL] resize up skipped insufficient new free inventory')
                     if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
+                        if not has_open_position and exchange_free_euri > min_qty_runtime:
+                            self._set_exit_reason('INVENTORY_CLEANUP')
+                        elif exit_only_mode:
+                            self._set_exit_reason('SL_EXIT')
+                        else:
+                            self._set_exit_reason('TP_EXIT')
                         sell_qty = floor_to_step(exchange_free_euri if (not has_open_position and exchange_free_euri > min_qty_runtime) else c.open_position_qty, step)
                         if not has_open_position and exchange_free_euri > min_qty_runtime:
                             self.logger.log('INFO', '[INV] cleanup mode')
@@ -1505,6 +1516,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._remember_optimistic_order(c.sell_order_id, 'SELL')
                             self._sell_started_at = time.time()
                             self._quote_birth[c.sell_order_id] = time.time()
+                            self._quote_birth_mono[c.sell_order_id] = time.monotonic()
                             self._ui_model_set('cs_top_ask_status', 'WORKING')
                             self.logger.log('INFO', '[SELL] armed')
                             # GUI updates are timer-driven only (SELL branch).
@@ -1514,35 +1526,27 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         min_reprice_ticks = Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
                         min_exit = max(c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick), bid + tick)
                         if exit_only_mode:
-                            sell_age = max(0, time.time() - self._sell_started_at) if c.sell_order_id else 0
-                            emergency_loss_ticks = Decimal(str(self.cfg.get('emergency_loss_ticks', 50) or 50))
-                            emergency_floor = c.buy_avg_price - (emergency_loss_ticks * tick)
-                            min_exit = self._exit_only_target_price(
-                                ask=ask,
-                                best_bid=bid,
-                                avg_buy=c.buy_avg_price,
-                                tick=tick,
-                                sell_age=sell_age,
-                                emergency_floor=emergency_floor,
-                            )
-                            self.logger.log('INFO', f'[EXIT] sell age={int(sell_age)}s target={min_exit} current={working_price}')
-                            if working_price > (min_exit + tick):
-                                self.logger.log('INFO', f'[EXIT] repost sell current={working_price} target={min_exit}')
+                            min_exit = bid + tick
+                            delta_ticks = ((working_price - bid) / tick) if tick > 0 else Decimal('0')
+                            age_ms = self._order_age_ms(c.sell_order_id)
+                            exit_aggr_ticks = Decimal(str(self.cfg.get('exit_aggr_ticks', 2) or 2))
+                            self.logger.log('INFO', f'[ORDERDBG] side=SELL id={c.sell_order_id} state={c.state.value} order_price={working_price} bid={bid} ask={ask} delta_bid_ticks={delta_ticks} delta_ask_ticks={((ask-working_price)/tick) if tick > 0 else Decimal('0')} age_ms={age_ms} reason={self._exit_reason}')
+                            if delta_ticks > exit_aggr_ticks or age_ms > 3000:
+                                self.logger.log('INFO', f'[SL] repost sell id={c.sell_order_id} old={working_price} new={min_exit} bid={bid} ask={ask} delta_ticks={delta_ticks} age_ms={age_ms}')
                                 try:
                                     self.orders.cancel(c.sell_order_id)
                                 except Exception:
                                     self.logger.log('INFO', '[RUNTIME] cancel race ignored')
-                                self._quote_birth.pop(c.sell_order_id, None)
+                                self._quote_birth.pop(c.sell_order_id, None); self._quote_birth_mono.pop(c.sell_order_id, None)
                                 c.sell_order_id = None
                                 self._active_sell_order_id = None
                                 self._pending_sell_order = None
                                 self._pending_sell_grace_until = 0.0
-                            else:
-                                self.logger.log('INFO', '[EXIT] holding sell target ok')
+
                         else:
                             protected_ask = max(ask, min_exit)
                             tick_move = abs(protected_ask - working_price) / tick if tick > 0 else Decimal('0')
-                            quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
+                            quote_age_ms = self._order_age_ms(c.sell_order_id)
                             min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
                             if ask < min_exit:
                                 self.logger.log('INFO', '[SELL] TP protected')
@@ -1564,7 +1568,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                         self.orders.cancel(c.sell_order_id)
                                     except Exception as e:
                                         self.logger.log('INFO', '[RUNTIME] cancel race ignored')
-                                    self._quote_birth.pop(c.sell_order_id, None)
+                                    self._quote_birth.pop(c.sell_order_id, None); self._quote_birth_mono.pop(c.sell_order_id, None)
                                     c.sell_order_id = None
                                     self._active_sell_order_id = None
                                     self.logger.log('INFO', '[RUNTIME] repost continue')
@@ -1597,6 +1601,18 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         if sell_age < 60:
             return avg_buy
         return max(best_bid + tick, emergency_floor)
+
+
+    def _order_age_ms(self, order_id: int | None) -> int:
+        if not order_id:
+            return 0
+        born = float(self._quote_birth_mono.get(int(order_id), 0.0))
+        if born <= 0:
+            return 0
+        return max(0, int((time.monotonic() - born) * 1000))
+
+    def _set_exit_reason(self, reason: str):
+        self._exit_reason = reason
 
     def _inventory_metrics(self):
         bid = Decimal(str(self._last_market_snapshot.get('bid', 0) or 0))
@@ -1752,7 +1768,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             until = self._stale_label_warn_until.get(key, 0.0)
             if now >= until:
                 self.logger.log('WARNING', f'[GUI] stale label ignored key={key}')
-                self._stale_label_warn_until[key] = now + 30.0
+                self._stale_label_warn_until[key] = now + 60.0
         return False
 
 
