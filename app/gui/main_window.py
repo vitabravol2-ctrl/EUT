@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self._data_mode = 'REST'
         self._last_data_mode = None
         self._last_market_ts = 0.0
+        self._last_market_source = 'NONE'
         self._session_started_at = time.time()
         self._trade_lots: list[dict] = []
         self._trade_stats = {'total': 0, 'buy_fills': 0, 'sell_fills': 0, 'cycles': 0, 'wins': 0, 'realized_pnl': Decimal('0'), 'ticks': Decimal('0'), 'fees': Decimal('0'), 'inventory_sells_count': 0, 'inventory_sells_qty': Decimal('0'), 'inventory_sells_quote': Decimal('0')}
@@ -194,9 +195,13 @@ class MainWindow(QMainWindow):
 
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
     def _startup_connect_flow(self):
+        self._load_exchange_filters()
+        self.refresh_balances(True)
+        self.refresh_orders(True)
+        self.refresh_market(True)
+        self.start_polling()
         self.logger.log('INFO', '[WS] connecting')
         self.ws.connect()
-        self._load_exchange_filters(); self.refresh_market(True); self.refresh_balances(True); self.refresh_orders(True); self.start_polling()
     def open_settings(self): self.settings_dialog=SettingsDialog(self.cfg,self.apply_settings,self.test_connection,self); self.settings_dialog.show()
     def open_trade_settings(self): self.trade_settings_dialog=TradeSettingsDialog(self.cfg,self.apply_trade_settings,self); self.trade_settings_dialog.show()
     def open_manual_order(self): self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
@@ -307,15 +312,23 @@ class MainWindow(QMainWindow):
         if not isValid(self):
             return
         if name=='market':
-            self._last_market_snapshot=dict(payload)
-            self._last_market_ts = time.time()
-            if self.ws.status.state != 'OK':
-                self.ws.mark_ok()
-                self.logger.log('INFO', '[WS] subscribed')
-                self.logger.log('INFO', '[WS] first tick')
-            else:
-                self.logger.log('INFO', '[WS] heartbeat ok')
-            metrics=self._spread_engine.observe(Decimal(str(payload.get('bid',0))), Decimal(str(payload.get('ask',0))), float(payload.get('latency_ms',0)))
+            market = dict(payload or {})
+            bid = Decimal(str(market.get('bid', 0) or 0))
+            ask = Decimal(str(market.get('ask', 0) or 0))
+            valid_market = bid > 0 and ask > 0 and ask > bid
+            if valid_market:
+                self._last_market_snapshot = market
+                self._last_market_ts = time.time()
+                source = str(market.get('source', '')).upper()
+                self._last_market_source = source if source in ('WS', 'REST') else ('WS' if self.ws.status.state == 'OK' else 'REST')
+                if self._last_market_source == 'WS':
+                    if self.ws.status.state != 'OK':
+                        self.ws.mark_ok()
+                        self.logger.log('INFO', '[WS] subscribed')
+                        self.logger.log('INFO', '[WS] first tick')
+                    else:
+                        self.logger.log('INFO', '[WS] heartbeat ok')
+            metrics=self._spread_engine.observe(bid, ask, float(market.get('latency_ms',0)))
             self._spread_metrics=metrics
             self._set_label_text(self.ss_ticks, f"raw={metrics.snapshot.spread:.8f} | ticks={metrics.snapshot.spread_ticks:.2f}")
             self._set_label_text(self.ss_lifetime, f"{metrics.state.spread_lifetime_ms}ms")
@@ -875,6 +888,8 @@ class MainWindow(QMainWindow):
         try:
             self._update_status_strip()
             self._update_runtime_stats_panel()
+            if self._live_running:
+                self._run_live_cycle()
         except RuntimeError as exc:
             # Qt can fire one last timer tick while widgets are being torn down.
             # Stop the periodic callback to avoid noisy "C++ object already deleted" traces.
@@ -888,14 +903,17 @@ class MainWindow(QMainWindow):
         spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
         stale_timeout_ms = int(self.cfg.get('market_stale_ms', 3000) or 3000)
         market_age_ms = int((time.time() - self._last_market_ts) * 1000) if self._last_market_ts > 0 else 10**9
-        if market_age_ms > stale_timeout_ms:
-            if self.ws.status.state == 'OK':
-                self.logger.log('INFO', '[WS] stale')
-                self.logger.log('INFO', '[WS] reconnecting')
-            self.ws.mark_error('market stale')
-        self._data_mode = 'WS' if self.ws.status.state == 'OK' else 'REST'
         stale = market_age_ms > stale_timeout_ms
-        data_status = 'DATA STALE' if stale else ('DATA WS OK' if self._data_mode == 'WS' else 'DATA REST OK')
+        if stale and self.ws.status.state == 'OK' and self._last_market_source == 'WS':
+            self.logger.log('INFO', '[WS] stale')
+            self.logger.log('INFO', '[WS] reconnecting')
+            self.ws.mark_error('market stale')
+        if stale:
+            self._data_mode = 'REST' if self._last_market_source == 'REST' else 'STALE'
+            data_status = 'DATA STALE'
+        else:
+            self._data_mode = 'WS' if self._last_market_source == 'WS' else 'REST'
+            data_status = 'DATA WS OK' if self._data_mode == 'WS' else 'DATA REST OK'
         self._status_badges['DATA'].setText(data_status)
         if self._data_mode != self._last_data_mode:
             self.logger.log('INFO', '[DATA] source=WS' if self._data_mode == 'WS' else '[DATA] source=REST')
@@ -907,7 +925,6 @@ class MainWindow(QMainWindow):
         self._status_balance_usdt.setText(f"{self._pair_config.quote_asset} {self._fmt_bal('QUOTE_free')} / locked {self._fmt_bal('QUOTE_locked')}")
 
     def _update_runtime_stats_panel(self):
-        self._update_status_strip()
         inv=self._inventory_metrics(); self.cs_inv_portfolio.setText(f"{inv['portfolio']:.2f}"); self.cs_inv_base_value.setText(f"{inv['base_value']:.2f}"); self.cs_inv_quote_value.setText(f"{inv['quote_value']:.2f}"); self.cs_inv_ratio.setText(f"{self._pair_config.base_asset} {inv['ratio']*100:.0f}% / {self._pair_config.quote_asset} {(Decimal('1')-inv['ratio'])*100:.0f}%"); self.cs_inv_drift.setText(inv['drift'])
         sig=(f"{inv['ratio']*100:.0f}",inv['drift'])
         if sig!=self._last_inventory_log_signature:
@@ -922,7 +939,6 @@ class MainWindow(QMainWindow):
         self.cs_trades.setText(str(self._trade_stats['total'])); self.cs_winrate.setText(f"{winrate:.2f}%"); self.cs_pnl.setText(f"{self._trade_stats['realized_pnl']:.8f}")
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(True)
         self._paint_status()
-        self._run_live_cycle()
     def _set_label_text(self, label: QLabel | None, value: str):
         if label is None or not isValid(label):
             return
