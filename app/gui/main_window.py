@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from decimal import Decimal
 import time
+import traceback
 
 from PySide6.QtCore import Qt, QTimer, QSignalBlocker
 from PySide6.QtGui import QFont
@@ -802,9 +803,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
                                 self.logger.log('INFO', f'[BUY] fill qty={delta}')
                                 self._on_buy_fill(delta, Decimal(str(st.get('price') or bid)))
-                                self._update_runtime_stats_from_ledger()
+                                # GUI updates are timer-driven only (SELL branch).
                                 self._refresh_balances_live('buy_fill')
-                                self._update_runtime_stats_from_ledger()
+                                # GUI updates are timer-driven only (SELL branch).
                                 self._refresh_orders_live('buy_fill')
                                 self.logger.log('INFO', '[SELL] increase quote qty=inventory refresh')
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
@@ -903,11 +904,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 c.apply_sell_fill(delta, Decimal(str(st.get('price') or ask)))
                                 self.logger.log('INFO', f'[SELL] fill qty={delta}')
                                 self._on_sell_fill(delta, Decimal(str(st.get('price') or ask)))
-                                self._update_runtime_stats_from_ledger()
+                                # GUI updates are timer-driven only (SELL branch).
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
-                                self._refresh_balances_live('sell_fill')
-                                self._update_runtime_stats_from_ledger()
-                                self._refresh_orders_live('sell_fill')
+                                # GUI updates are timer-driven only (SELL branch).
+                                # GUI updates are timer-driven only (SELL branch).
+                                # GUI updates are timer-driven only (SELL branch).
                         except Exception as e:
                             self.logger.log('INFO', f'[RUNTIME] reconcile SELL status fetch failed -> {e}')
                             sell_status = None
@@ -928,10 +929,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self._active_sell_order_id = None
                         self._pending_sell_order = None
                         self._pending_sell_grace_until = 0.0
-                    self._refresh_balances_live('pre_sell_compute')
-                    self._update_runtime_stats_from_ledger()
-                    self._refresh_orders_live('pre_sell_compute')
-                    self._update_runtime_stats_from_ledger()
+                    # GUI updates are timer-driven only (SELL branch).
+                    # GUI updates are timer-driven only (SELL branch).
+                    # GUI updates are timer-driven only (SELL branch).
+                    # GUI updates are timer-driven only (SELL branch).
                     exchange_free_euri = floor_to_step(max(Decimal('0'), Decimal(str(self._balances.get('BASE_free', 0)))), step)
                     max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10))) * inv['sell_mult']
                     active_sell_remaining_qty = Decimal('0')
@@ -979,8 +980,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self.logger.log('INFO', '[SELL] cancel for resize')
                             self.orders.cancel(c.sell_order_id)
                             self.logger.log('INFO', '[SELL] resize confirmed')
-                            self._refresh_balances_live('sell_resize_cancel', force=True)
-                            self._refresh_orders_live('sell_resize_cancel', force=True)
+                            # GUI updates are timer-driven only (SELL branch).
+                            # GUI updates are timer-driven only (SELL branch).
                             c.sell_order_id = None
                             self._active_sell_order_id = None
                             self._pending_sell_order = None
@@ -991,8 +992,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 self.logger.log('INFO', '[SELL] cancel for resize')
                                 self.orders.cancel(c.sell_order_id)
                                 self.logger.log('INFO', '[SELL] resize confirmed')
-                                self._refresh_balances_live('sell_resize_cancel', force=True)
-                                self._refresh_orders_live('sell_resize_cancel', force=True)
+                                # GUI updates are timer-driven only (SELL branch).
+                                # GUI updates are timer-driven only (SELL branch).
                                 c.sell_order_id = None
                                 self._active_sell_order_id = None
                                 self._pending_sell_order = None
@@ -1012,8 +1013,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
                             except Exception as e:
                                 if 'insufficient' in str(e).lower() and 'balance' in str(e).lower():
-                                    self._refresh_balances_live('sell_balance_error', force=True)
-                                    self._refresh_orders_live('sell_balance_error', force=True)
+                                    # GUI updates are timer-driven only (SELL branch).
+                                    # GUI updates are timer-driven only (SELL branch).
                                     if c.sell_order_id and c.sell_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}:
                                         c.sell_order_id = None
                                         self._active_sell_order_id = None
@@ -1033,7 +1034,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._quote_birth[c.sell_order_id] = time.time()
                             self._ui_model_set('cs_top_ask_status', 'WORKING')
                             self.logger.log('INFO', '[SELL] armed')
-                            self._refresh_orders_live('sell_place', force=True)
+                            # GUI updates are timer-driven only (SELL branch).
                     else:
                         os = self._orders_by_id.get(c.sell_order_id, {})
                         working_price = Decimal(str(os.get('price') or ask))
@@ -1087,7 +1088,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._sell_top_state = 'TOP'
     
             except Exception as e:
-                self.logger.log('ERROR', f'sell branch failed: {e}')
+                self.logger.log('ERROR', 'sell branch failed:\n' + traceback.format_exc())
 
             self.refresh_orders(True)
         except Exception as e:
