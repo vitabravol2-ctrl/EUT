@@ -28,10 +28,12 @@ class FillObserver:
         self,
         min_spread_ticks: int,
         stable_ms: int,
+        symbol: str = 'EURIUSDT',
         fill_window_ms: int | None = None,
         block_high_activity: bool = False,
         now_fn: Callable[[], float] | None = None,
     ) -> None:
+        self.symbol = str(symbol or 'EURIUSDT').upper()
         self.min_spread_ticks = max(min_spread_ticks, 1)
         self.stable_ms = max(stable_ms, 1)
         self.fill_window_ms = max(fill_window_ms if fill_window_ms is not None else self.stable_ms, 1)
@@ -56,12 +58,16 @@ class FillObserver:
         fill_window_ms = min(bid_ms, ask_ms, max(spread_lifetime_ms, 0))
 
         activity = self._activity_from_lifetimes(bid_ms, ask_ms)
-        fill_possible = (
-            spread_ticks >= Decimal(self.min_spread_ticks)
-            and spread_lifetime_ms >= self.stable_ms
-            and fill_window_ms >= self.fill_window_ms
-            and (not self.block_high_activity or activity != MarketActivity.HIGH)
-        )
+        is_btcu = self.symbol == 'BTCU'
+        if is_btcu:
+            fill_possible = spread_ticks >= Decimal(self.min_spread_ticks) and bid > 0 and ask > bid
+        else:
+            fill_possible = (
+                spread_ticks >= Decimal(self.min_spread_ticks)
+                and spread_lifetime_ms >= self.stable_ms
+                and fill_window_ms >= self.fill_window_ms
+                and (not self.block_high_activity or activity != MarketActivity.HIGH)
+            )
 
         return FillObservation(
             bid_lifetime_ms=bid_ms,

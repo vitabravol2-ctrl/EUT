@@ -3,6 +3,19 @@ from decimal import Decimal
 from app.core.fill_observer import FillObserver, MarketActivity
 
 
+def test_spread_ticks_math_btcu_reference_case():
+    bid = Decimal('80760.01')
+    ask = Decimal('80764.81')
+    tick_size = Decimal('0.01')
+    assert (ask - bid) / tick_size == Decimal('480')
+
+
+def test_spread_ticks_math_euri_reference_case():
+    spread = Decimal('0.0002')
+    tick_size = Decimal('0.0001')
+    assert spread / tick_size == Decimal('2')
+
+
 def test_fill_window_and_possible_transition():
     t = [100.0]
     observer = FillObserver(min_spread_ticks=2, stable_ms=1000, now_fn=lambda: t[0])
@@ -55,3 +68,18 @@ def test_high_activity_not_blocking_by_default():
     obs = observer.observe(Decimal('1.1000'), Decimal('1.1003'), Decimal('3'), 600)
     assert obs.market_activity == MarketActivity.HIGH
     assert obs.fill_possible is True
+
+
+def test_btcu_fast_mode_does_not_require_long_window_or_stability():
+    t = [1.0]
+    observer = FillObserver(min_spread_ticks=2, stable_ms=3000, symbol='BTCU', fill_window_ms=3000, block_high_activity=True, now_fn=lambda: t[0])
+    obs = observer.observe(Decimal('80760.01'), Decimal('80764.81'), Decimal('480'), 10)
+    assert obs.market_activity == MarketActivity.HIGH
+    assert obs.fill_possible is True
+
+
+def test_euri_keeps_stability_gate():
+    t = [1.0]
+    observer = FillObserver(min_spread_ticks=2, stable_ms=1000, symbol='EURIUSDT', fill_window_ms=1000, now_fn=lambda: t[0])
+    obs = observer.observe(Decimal('1.1000'), Decimal('1.1002'), Decimal('2'), 10)
+    assert obs.fill_possible is False
