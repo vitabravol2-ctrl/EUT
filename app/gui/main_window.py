@@ -161,7 +161,7 @@ class MainWindow(QMainWindow):
         self.client=BinanceClient(self.cfg['api_key'],self.cfg['api_secret'],self.cfg['testnet'],self.cfg.get('request_timeout_sec',3)); self.market=MarketService(self.client,self.cfg['symbol']); self.account=AccountService(self.client, self._pair_config.base_asset, self._pair_config.quote_asset); self.orders=OrderService(self.client,self.cfg['symbol'])
     def _build_ui(self):
         root=QWidget(); self.setCentralWidget(root); main=QVBoxLayout(root); top=QGroupBox('Status Strip'); l=QHBoxLayout(top)
-        for k in ['CONNECTED','SPREAD','DATA','HARVEST','ORDERS','RISK']:
+        for k in ['CONNECTED','DATA','FILTERS','BALANCE','MARKET','FILL','SPREAD','LIVE','CYCLE','ORDER','RISK']:
             b=QLabel(f'{k} -'); self._status_badges[k]=b; l.addWidget(b)
         self._status_balance_euri=QLabel('BASE - / locked -'); l.addWidget(self._status_balance_euri)
         self._status_balance_usdt=QLabel('QUOTE - / locked -'); l.addWidget(self._status_balance_usdt)
@@ -170,11 +170,11 @@ class MainWindow(QMainWindow):
         left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_pair_profile=QLabel('-'); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
         self.pair_selector = QComboBox(); self.pair_selector.addItems(list_pairs()); self.pair_selector.currentTextChanged.connect(self._on_pair_selected)
         for n,w in [('PAIR',self.pair_selector),('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Pair profile',self.ts_pair_profile),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
-        self.start_button = QPushButton('START HARVEST')
-        self.start_button.clicked.connect(self.start_harvest)
-        self.stop_button = self._btn('STOP HARVEST', self.stop_harvest)
+        self.start_button = QPushButton('HARVEST OFF')
+        self.start_button.clicked.connect(self.toggle_harvest)
+        self.stop_button = self.start_button
         self.edit_settings_button = self._btn('Edit Settings', self.open_trade_settings)
-        fl.addRow(self.start_button); fl.addRow(self.stop_button); fl.addRow(self.edit_settings_button)
+        fl.addRow(self.start_button); fl.addRow(self.edit_settings_button)
         cycle=QGroupBox('Runtime / Stats'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
         self.cs_inv_portfolio=QLabel('-'); self.cs_inv_base_value=QLabel('-'); self.cs_inv_quote_value=QLabel('-'); self.cs_inv_ratio=QLabel('-'); self.cs_inv_drift=QLabel('-')
         self.cs_trades=QLabel('0'); self.cs_winrate=QLabel('0.0%'); self.cs_data_source=QLabel('REST'); self.cs_open_orders=QLabel('0')
@@ -217,8 +217,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 """)
         split.addWidget(left); split.addWidget(center); split.addWidget(cycle); split.addWidget(right); split.setStretchFactor(1, 3); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
-        self.logger.log('INFO', '[GUI] action wired START')
-        self.logger.log('INFO', '[GUI] action wired STOP')
+        self.logger.log('INFO', '[GUI] action wired HARVEST_TOGGLE')
         self.logger.log('INFO', '[GUI] action wired MANUAL')
         self.logger.log('INFO', '[GUI] action wired CANCEL_SELECTED')
         self.logger.log('INFO', '[GUI] action wired CANCEL_ALL')
@@ -625,9 +624,30 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         reason = ', '.join(reasons) if reasons else 'unknown'
         return f'[FILL] not possible reason={reason} bid={bid} ask={ask} spread_ticks={spread_ticks:.2f} bid_lifetime_ms={obs.bid_lifetime_ms} ask_lifetime_ms={obs.ask_lifetime_ms} market_activity={obs.market_activity.value} min_required={min_required}'
 
+    def _update_harvest_button(self):
+        state = 'OFF'
+        color = '#9e9e9e'
+        if not self._private_ok and self._live_running:
+            state = 'BLOCKED'
+            color = '#f44336'
+        elif self._live_running:
+            state = 'ON'
+            color = '#4caf50'
+        elif self._cycle.state == CycleState.WAIT_READY:
+            state = 'WAITING'
+            color = '#fbc02d'
+        self.start_button.setText(f'HARVEST {state}')
+        self.start_button.setStyleSheet(f'background: {color}; font-weight: 700;')
+
+    def toggle_harvest(self):
+        if self._live_running:
+            self.stop_harvest()
+        else:
+            self.start_harvest()
+
     def start_harvest(self):
         try:
-            self.logger.log('INFO', '[GUI] START clicked')
+            self.logger.log('INFO', '[GUI] HARVEST toggle ON')
             self.logger.log('INFO', f'[GUI] private_ok={self._private_ok} live={self._live_running}')
             debug_force = bool(globals().get("DEBUG_FORCE_START", False))
             if not self._private_ok and not debug_force:
@@ -637,7 +657,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self.logger.log('INFO', '[GUI] DEBUG_FORCE_START direct runtime call')
             self._start_live_runtime()
         except Exception as e:
-            self.logger.log('ERROR', f'[ERROR] GUI action failed action=START error={e}')
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=HARVEST_ON error={e}')
 
     def _start_live_runtime(self):
         try:
@@ -656,7 +676,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def stop_harvest(self):
         try:
             self._live_running = False
-            self.logger.log('INFO', '[LIVE] stopped')
+            self.logger.log('INFO', '[GUI] HARVEST toggle OFF')
+            self.logger.log('INFO', '[LIVE] runtime stopped')
+            self._runtime_active = False
             if self._cycle.state == CycleState.ERROR:
                 old, new = self._cycle.transition(CycleState.STOPPED, 'stop from error')
                 self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop from error')
@@ -678,11 +700,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 old, new = self._cycle.transition(CycleState.STOPPED, 'stop idle')
                 self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop idle')
         except Exception as e:
-            self.logger.log('ERROR', f'[ERROR] GUI action failed action=STOP error={e}')
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=HARVEST_OFF error={e}')
 
     def _run_live_cycle(self):
         c = self._cycle
         if not self._live_running:
+            self._log_throttled('live_wait_not_running', '[LIVE] waiting reason=harvest off', 7.0)
             return
         try:
             self._cleanup_duplicate_side_orders()
@@ -715,7 +738,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             max_long = Decimal(str(self.cfg.get('max_long_inventory_euri', 500)))
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
             net_inv = c.net_inventory_euri
-            self._log_throttled('runtime_loop_active', '[RUNTIME] loop active', 10.0)
+            self._log_throttled('runtime_cycle_enter', f"[RUNTIME] cycle enter live={self._live_running} private_ok={self._private_ok} fill={self.fo_possible.text() if self.fo_possible else '-'} spread={self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'} data={self._data_mode}", 3.0)
 
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
 
@@ -1046,6 +1069,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self._update_status_strip()
             self._update_runtime_stats_panel()
             if self._live_running:
+                self._log_throttled('live_tick_cycle', '[LIVE] tick live=True calling run_live_cycle', 3.0)
                 self._run_live_cycle()
         except RuntimeError as exc:
             # Qt can fire one last timer tick while widgets are being torn down.
@@ -1079,10 +1103,22 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         risk_enabled = bool(self.cfg.get('risk_guard_enabled'))
         risk_label = 'BLOCKED' if (risk_enabled and risk_blocked) else 'OK'
         self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
-        self._status_badges['SPREAD'].setText(f"SPREAD {spread}")
+        spread_ticks = f"{self._spread_metrics.snapshot.spread_ticks:.2f}" if self._spread_metrics else '-'
+        self._status_badges['SPREAD'].setText(f"SPREAD {spread} ticks={spread_ticks}")
         self._status_badges['DATA'].setText(data_status)
-        self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if harvest_running else 'HARVEST IDLE')
-        self._status_badges['ORDERS'].setText(f"ORDERS {len(self._last_open_orders)}"); self._status_badges['RISK'].setText(f"RISK {risk_label}")
+        self._status_badges['LIVE'].setText('LIVE ✅' if harvest_running else 'LIVE ❌')
+        self._status_badges['CONNECTED'].setText(f"CONNECTED {'✅' if self._private_ok else '❌'}")
+        self._status_badges['DATA'].setText(f"DATA {'✅' if not stale else '❌'}")
+        self._status_badges['FILTERS'].setText(f"FILTERS {'✅' if bool(self.get_symbol_filters()) else '❌'}")
+        bal_ok = Decimal(str(self._balances.get('QUOTE_free',0))) > 0
+        self._status_badges['BALANCE'].setText(f"BALANCE {'✅' if bal_ok else '❌'}")
+        market_ok = self._last_market_ts > 0 and not stale
+        self._status_badges['MARKET'].setText(f"MARKET {'✅' if market_ok else '❌'}")
+        fill_ok = (self.fo_possible.text() == 'YES') if self.fo_possible else False
+        self._status_badges['FILL'].setText(f"FILL {'✅' if fill_ok else '❌'}")
+        self._status_badges['CYCLE'].setText(f"CYCLE {self._cycle.state.value}")
+        self._status_badges['ORDER'].setText(f"ORDER {'✅' if len(self._last_open_orders)>0 else '❌'}")
+        self._status_badges['RISK'].setText(f"RISK {risk_label}")
         self._status_balance_euri.setText(f"{self._pair_config.base_asset} {self._fmt_bal('BASE_free')} / locked {self._fmt_bal('BASE_locked')}")
         self._status_balance_usdt.setText(f"{self._pair_config.quote_asset} {self._fmt_bal('QUOTE_free')} / locked {self._fmt_bal('QUOTE_locked')}")
 
@@ -1099,7 +1135,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         avg = (self._trade_stats['realized_pnl'] / Decimal(cycles)) if self._trade_stats['cycles'] > 0 else Decimal('0')
         self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders)))
         self.cs_trades.setText(str(self._trade_stats['total'])); self.cs_winrate.setText(f"{winrate:.2f}%"); self.cs_pnl.setText(f"{self._trade_stats['realized_pnl']:.8f}")
-        self.start_harvest_btn.setEnabled(self._private_ok and not self._live_running); self.stop_harvest_btn.setEnabled(self._live_running)
+        self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(False); self._update_harvest_button()
         self._paint_status()
     def _set_label_text(self, label: QLabel | None, value: str):
         if label is None or not isValid(label):
@@ -1118,7 +1154,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self._set_label_color(self._status_badges['DATA'], '#f44336' if data_state == 'DATA STALE' else ('#4caf50' if self._data_mode == 'WS' else '#fbc02d'))
         risk_ok, _ = self._risk_ok()
         self._set_label_color(self._status_badges['RISK'], '#4caf50' if risk_ok else '#f44336')
-        self._set_label_color(self._status_badges['HARVEST'], '#4caf50' if self._live_running else '#fbc02d')
+        self._set_label_color(self._status_badges['LIVE'], '#4caf50' if self._live_running else '#f44336')
         self._set_label_color(self.cs_top_bid_status, {'TOP': '#4caf50', 'WORKING': '#fbc02d', 'REPRICING': '#ff9800', 'NO INVENTORY': '#9e9e9e', 'ERROR': '#f44336'}.get(self.cs_top_bid_status.text(), '#e6edf3'))
         self._set_label_color(self.cs_top_ask_status, {'TOP': '#4caf50', 'WORKING': '#fbc02d', 'REPRICING': '#ff9800', 'NO INVENTORY': '#9e9e9e', 'ERROR': '#f44336'}.get(self.cs_top_ask_status.text(), '#e6edf3'))
         cycle_color = {'IDLE': '#9e9e9e', 'WAIT_READY': '#fbc02d', 'PLACE_BUY': '#42a5f5', 'BUY_WORKING': '#42a5f5', 'CANCEL_BUY': '#ff9800', 'BUY_FILLED': '#4caf50', 'PLACE_SELL': '#42a5f5', 'SELL_WORKING': '#42a5f5', 'CANCEL_SELL': '#ff9800', 'SELL_FILLED': '#4caf50', 'PROFIT_LOCKED': '#4caf50', 'EXIT_PENDING': '#ff9800', 'ERROR': '#f44336', 'STOPPED': '#9e9e9e'}.get(self._cycle.state.value, '#e6edf3')
