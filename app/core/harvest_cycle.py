@@ -86,15 +86,16 @@ class HarvestCycle:
         if fill_qty <= 0:
             return
         qty = min(fill_qty, self.open_position_qty)
-        proceeds_before = self.sell_avg_price * self.sell_filled_qty
-        self.sell_filled_qty += qty
-        self.sell_avg_price = (proceeds_before + (qty * fill_price)) / self.sell_filled_qty
-        self.open_position_qty -= qty
-        self.closed_qty += qty
-        self.realized_pnl += (fill_price - self.buy_avg_price) * qty
-        self.inventory_euri -= qty
-        self.inventory_usdt += qty * fill_price
-        self.net_inventory_euri = self.buy_filled_qty - self.sell_filled_qty
+        if qty > 0:
+            proceeds_before = self.sell_avg_price * self.sell_filled_qty
+            self.sell_filled_qty += qty
+            self.sell_avg_price = (proceeds_before + (qty * fill_price)) / self.sell_filled_qty
+            self.open_position_qty -= qty
+            self.closed_qty += qty
+            self.realized_pnl += (fill_price - self.buy_avg_price) * qty
+            self.inventory_euri -= qty
+            self.inventory_usdt += qty * fill_price
+        self.net_inventory_euri = max(Decimal('0'), self.buy_filled_qty - self.sell_filled_qty)
         self.updated_at = _now()
 
     def next_state_after_buy_cancel(self) -> CycleState:

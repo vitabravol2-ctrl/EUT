@@ -450,9 +450,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self._spread_metrics=metrics
             tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
             spread_raw = ask - bid if ask > bid else Decimal('0')
-            spread_ticks = (spread_raw / tick) if tick > 0 else Decimal('0')
+            spread_ticks = self._compute_spread_ticks(bid, ask)
             self.logger.log('INFO', f"[MARKET] symbol={self.cfg.get('symbol','EURIUSDT')} bid={bid} ask={ask} tickSize={tick} spread_raw={spread_raw} spread_ticks={spread_ticks}")
-            self._set_label_text(self.ss_ticks, f"raw={metrics.snapshot.spread:.8f} | ticks={metrics.snapshot.spread_ticks:.2f}")
+            self._set_label_text(self.ss_ticks, f"raw={metrics.snapshot.spread:.8f} | ticks={int(spread_ticks)}")
             self._set_label_text(self.ss_lifetime, f"{metrics.state.spread_lifetime_ms}ms")
             self._set_label_text(self.ss_bid, f"{metrics.state.best_bid_unchanged_ms}ms")
             self._set_label_text(self.ss_ask, f"{metrics.state.best_ask_unchanged_ms}ms")
@@ -481,7 +481,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self.logger.log('INFO', f"[FILL] slow_market={'YES' if slow_market else 'NO'}")
                 self._last_slow_market = slow_market
             if metrics.state.readiness != self._last_spread_readiness:
-                self.logger.log('INFO', f"[SPREAD] {metrics.state.readiness.value} ticks={metrics.snapshot.spread_ticks:.2f} lifetime={metrics.state.spread_lifetime_ms}ms")
+                self.logger.log('INFO', f"[SPREAD] {metrics.state.readiness.value} ticks={int(spread_ticks)} lifetime={metrics.state.spread_lifetime_ms}ms")
                 self._last_spread_readiness=metrics.state.readiness
             if self._cycle.state == CycleState.IDLE:
                 old, new = self._cycle.transition(CycleState.WAIT_READY, 'boot')
@@ -749,6 +749,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             return
         try:
             self._cleanup_duplicate_side_orders()
+            if c.net_inventory_euri < 0:
+                self.logger.log('RISK', '[RISK] inventory underflow corrected')
+                c.net_inventory_euri = Decimal('0')
             if c.state != CycleState.WAIT_READY:
                 old, new = c.transition(CycleState.WAIT_READY, 'continuous runtime')
                 self.logger.log('FSM', f'{old.value} -> {new.value} reason=continuous runtime')
@@ -771,7 +774,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             tick = Decimal(str(filters.get('tickSize', '0.0001')))
             step = Decimal(str(filters.get('stepSize', '0.0001')))
             min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
-            spread_ticks = (ask - bid) / tick if tick > 0 else Decimal('0')
+            spread_ticks = self._compute_spread_ticks(bid, ask)
             if spread_ticks < min_spread_ticks:
                 self._log_throttled('live_wait_spread_not_ready', '[LIVE] waiting reason=spread not ready', 7.0)
                 return
@@ -785,43 +788,51 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
             # BUY engine (independent)
             inv = self._inventory_metrics()
+            inv_mode, inv_risk, _ = self._inventory_risk_state(inv['ratio'])
             available_buy_usdt = Decimal(str(self._balances.get('QUOTE_free', 0)))
             buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10))) * inv['buy_mult']
             min_buy_free = Decimal(str(self.cfg.get('min_buy_free_usdt', 5.0)))
+            buy_allowed = inv_risk not in ('HEAVY', 'DANGER') and not (c.sell_order_id and inv['ratio'] > Decimal(str(self.cfg.get('target_inventory_ratio', 0.5))))
             if net_inv < max_long and available_buy_usdt >= max(min_buy_free, buy_quote):
+                if not buy_allowed:
+                    if inv_risk in ('HEAVY', 'DANGER'):
+                        self.logger.log('RISK', '[RISK] buy blocked: inventory heavy')
+                    else:
+                        self.logger.log('INFO', '[BUY] skipped: exit priority')
                 buy_status = None
-                if c.buy_order_id:
-                    try:
-                        st = self.orders.order_status(c.buy_order_id)
-                        buy_status = safe_status(st)
-                        self.cs_buy_status.setText(str(buy_status))
-                        exec_qty = Decimal(str(st.get('executedQty', '0')))
-                        delta = exec_qty - c.buy_filled_qty
-                        if delta > 0:
-                            c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
-                            self.logger.log('INFO', f'[BUY] fill qty={delta}')
-                            self._on_buy_fill(delta, Decimal(str(st.get('price') or bid)))
-                            self._refresh_balances_live('buy_fill')
-                            self._refresh_orders_live('buy_fill')
-                            self.logger.log('INFO', '[SELL] increase quote qty=inventory refresh')
-                            self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
-                    except Exception as e:
-                        self.logger.log('INFO', f'[RUNTIME] reconcile BUY status fetch failed -> {e}')
-                        buy_status = None
-                if c.buy_order_id and c.buy_order_id in open_order_ids:
+                if buy_allowed:
+                    if c.buy_order_id:
+                        try:
+                            st = self.orders.order_status(c.buy_order_id)
+                            buy_status = safe_status(st)
+                            self.cs_buy_status.setText(str(buy_status))
+                            exec_qty = Decimal(str(st.get('executedQty', '0')))
+                            delta = exec_qty - c.buy_filled_qty
+                            if delta > 0:
+                                c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
+                                self.logger.log('INFO', f'[BUY] fill qty={delta}')
+                                self._on_buy_fill(delta, Decimal(str(st.get('price') or bid)))
+                                self._refresh_balances_live('buy_fill')
+                                self._refresh_orders_live('buy_fill')
+                                self.logger.log('INFO', '[SELL] increase quote qty=inventory refresh')
+                                self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
+                        except Exception as e:
+                            self.logger.log('INFO', f'[RUNTIME] reconcile BUY status fetch failed -> {e}')
+                            buy_status = None
+                if buy_allowed and c.buy_order_id and c.buy_order_id in open_order_ids:
                     if self._pending_buy_order == c.buy_order_id:
                         self._pending_buy_order = None
                         self._pending_buy_grace_until = 0.0
-                if c.buy_order_id and c.buy_order_id not in open_order_ids and buy_grace_active:
+                if buy_allowed and c.buy_order_id and c.buy_order_id not in open_order_ids and buy_grace_active:
                     pass
-                elif c.buy_order_id and c.buy_order_id not in open_order_ids:
+                elif buy_allowed and c.buy_order_id and c.buy_order_id not in open_order_ids:
                     self.logger.log('INFO', '[BUY] lost, reconciling')
-                if should_clear_active_order(c.buy_order_id, buy_status, open_order_ids) and not buy_grace_active:
+                if buy_allowed and should_clear_active_order(c.buy_order_id, buy_status, open_order_ids) and not buy_grace_active:
                     c.buy_order_id = None
                     self._active_buy_order_id = None
                     self._pending_buy_order = None
                     self._pending_buy_grace_until = 0.0
-                if not c.buy_order_id and not buy_grace_active and not self._pending_buy_order:
+                if buy_allowed and not c.buy_order_id and not buy_grace_active and not self._pending_buy_order:
                     qty_n = floor_to_step(buy_quote / bid, step) if bid > 0 else Decimal('0')
                     if qty_n > 0:
                         price = floor_to_tick(bid, tick)
@@ -1100,6 +1111,24 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         sell_mult = Decimal('1') + (-boost if delta > 0 else boost)
         return {'portfolio':portfolio,'base_value':euri_value,'quote_value':usdt_total,'ratio':ratio,'drift':drift,'color':color,'buy_mult':max(Decimal('0.50'), buy_mult),'sell_mult':max(Decimal('0.50'), sell_mult)}
 
+    def _compute_spread_ticks(self, bid: Decimal, ask: Decimal) -> Decimal:
+        tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
+        if bid <= 0 or ask <= bid or tick <= 0:
+            return Decimal('0')
+        return (ask - bid) / tick
+
+    def _inventory_risk_state(self, ratio: Decimal) -> tuple[str, str, str]:
+        target = Decimal(str(self.cfg.get('target_inventory_ratio', 0.5)))
+        soft = Decimal(str(self.cfg.get('inventory_soft_limit', 0.65)))
+        hard = Decimal(str(self.cfg.get('inventory_hard_limit', 0.80)))
+        if ratio > hard:
+            return 'EXIT_ONLY', 'DANGER', 'RISK INVENTORY DANGER'
+        if ratio > soft:
+            return 'HARVEST', 'HEAVY', 'RISK INVENTORY HEAVY'
+        if ratio > target:
+            return 'HARVEST', 'OK', 'RISK OK'
+        return 'HARVEST', 'OK', 'RISK OK'
+
     def _tick_status(self):
         if not isValid(self):
             return
@@ -1136,9 +1165,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self._last_data_mode = self._data_mode
         risk_blocked = bool(self._balances.get('risk_blocked', False))
         risk_enabled = bool(self.cfg.get('risk_guard_enabled'))
-        risk_label = 'BLOCKED' if (risk_enabled and risk_blocked) else 'OK'
+        inv = self._inventory_metrics()
+        inv_mode, inv_risk, inv_strip = self._inventory_risk_state(inv['ratio'])
+        risk_label = 'BLOCKED' if (risk_enabled and risk_blocked) else inv_risk
         self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
-        spread_ticks = f"{self._spread_metrics.snapshot.spread_ticks:.2f}" if self._spread_metrics else '-'
+        spread_ticks = str(int(self._compute_spread_ticks(Decimal(str(self._last_market_snapshot.get('bid', 0) or 0)), Decimal(str(self._last_market_snapshot.get('ask', 0) or 0))))) if self._spread_metrics else '-' 
         self._status_badges['SPREAD'].setText(f"SPREAD {spread} ticks={spread_ticks}")
         self._status_badges['DATA'].setText(data_status)
         self._status_badges['LIVE'].setText('LIVE ✅' if harvest_running else 'LIVE ❌')
@@ -1169,7 +1200,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         cycles = max(1, self._trade_stats['cycles'])
         winrate = (Decimal(self._trade_stats['wins']) / Decimal(cycles) * Decimal('100')) if self._trade_stats['cycles'] > 0 else Decimal('0')
         avg = (self._trade_stats['realized_pnl'] / Decimal(cycles)) if self._trade_stats['cycles'] > 0 else Decimal('0')
-        self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders)))
+        self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders))); inv=self._inventory_metrics(); mode,risk,_=self._inventory_risk_state(inv['ratio']); self.cs_reason.setText(f"mode={mode} risk={risk} ratio={inv['ratio']*100:.1f}% exit_wait={int(max(0,time.time()-self._sell_started_at)) if self._active_sell_order_id else 0}s")
         self.cs_trades.setText(str(self._trade_stats['total'])); self.cs_winrate.setText(f"{winrate:.2f}%"); self.cs_pnl.setText(f"{self._trade_stats['realized_pnl']:.8f}")
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(False); self._update_harvest_button()
         self._paint_status()
