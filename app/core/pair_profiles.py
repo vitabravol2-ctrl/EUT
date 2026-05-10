@@ -18,6 +18,8 @@ class PairConfig:
     top_check_interval_sec: float
     top_hold_patience_sec: float
     quote_refresh_interval_sec: float
+    maker_fee_rate: float
+    taker_fee_rate: float
 
 
 PAIR_REGISTRY: dict[str, PairConfig] = {
@@ -32,6 +34,8 @@ PAIR_REGISTRY: dict[str, PairConfig] = {
         top_check_interval_sec=0.40,
         top_hold_patience_sec=2.00,
         quote_refresh_interval_sec=1.50,
+        maker_fee_rate=0.0,
+        taker_fee_rate=0.0,
     ),
     'BTCU': PairConfig(
         symbol='BTCU',
@@ -44,6 +48,8 @@ PAIR_REGISTRY: dict[str, PairConfig] = {
         top_check_interval_sec=0.15,
         top_hold_patience_sec=0.75,
         quote_refresh_interval_sec=0.80,
+        maker_fee_rate=0.0,
+        taker_fee_rate=0.0,
     ),
 }
 
@@ -79,6 +85,8 @@ def get_pair_config(symbol: str) -> PairConfig:
         top_check_interval_sec=default.top_check_interval_sec,
         top_hold_patience_sec=default.top_hold_patience_sec,
         quote_refresh_interval_sec=default.quote_refresh_interval_sec,
+        maker_fee_rate=default.maker_fee_rate,
+        taker_fee_rate=default.taker_fee_rate,
     )
 
 

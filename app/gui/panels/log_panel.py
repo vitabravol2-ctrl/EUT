@@ -20,6 +20,13 @@ class LogPanel(QWidget):
         self._compact_mode = True
         self._visible_limit = min(200, max_lines)
         self._compact_tags = ('[BUY]', '[SELL]', '[TRADE]', '[PNL]', '[RISK]', '[ERROR]', '[DATA]', '[PAIR]')
+        self._compact_excluded_fragments = (
+            'capacity total',
+            'routine repost',
+            'grace window',
+            'waiting exchange visibility',
+            'reconcile skipped (fresh order)',
+        )
         header = QHBoxLayout()
         self.toggle_btn = QPushButton('Hide Logs')
         self.toggle_btn.clicked.connect(self.toggle_collapsed)
@@ -41,6 +48,8 @@ class LogPanel(QWidget):
         if not self._collapsed:
             if self._compact_mode:
                 if not str(rec.message).startswith(self._compact_tags):
+                    return
+                if any(fragment in str(rec.message).lower() for fragment in self._compact_excluded_fragments):
                     return
                 self.text.moveCursor(QTextCursor.End)
                 self.text.insertHtml(line + '<br/>')
