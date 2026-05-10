@@ -66,7 +66,7 @@ def test_no_sell_without_inventory(qapp):
     w._cycle.buy_filled_qty = Decimal('0')
     w._cycle.sell_filled_qty = Decimal('0')
     w._run_live_cycle()
-    assert w.cs_top_ask_status.text() == 'DISABLED_NO_INV'
+    assert w.cs_top_ask_status.text() == 'NO BTC TO SELL'
     assert all(side != 'SELL' for side, _, _ in w.orders.placed)
 
 
@@ -166,7 +166,7 @@ def test_disabled_no_inv_not_triggered_with_free_euri(qapp):
     w = _ready_window()
     w._balances['EURI_free'] = '1'
     w._run_live_cycle()
-    assert w.cs_top_ask_status.text() != 'DISABLED_NO_INV'
+    assert w.cs_top_ask_status.text() != 'NO BTC TO SELL'
 
 
 def test_continuous_dual_sided_runtime_survives_100_ticks(qapp):

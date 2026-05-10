@@ -10,6 +10,8 @@ def test_get_pair_config_btcu_quote_asset_u():
     cfg = get_pair_config('BTCU')
     assert cfg.base_asset == 'BTC'
     assert cfg.quote_asset == 'U'
+    assert cfg.maker_fee_rate == 0
+    assert cfg.taker_fee_rate == 0
 
 
 def test_get_pair_config_fallback_dynamic_symbol():

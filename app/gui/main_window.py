@@ -116,9 +116,10 @@ class MainWindow(QMainWindow):
         self._quote_birth: dict[int, float] = {}
         self._data_mode = 'REST'
         self._last_data_mode = None
+        self._last_market_ts = 0.0
         self._session_started_at = time.time()
         self._trade_lots: list[dict] = []
-        self._trade_stats = {'total': 0, 'buy_fills': 0, 'sell_fills': 0, 'cycles': 0, 'wins': 0, 'realized_pnl': Decimal('0'), 'ticks': Decimal('0'), 'fees': Decimal('0')}
+        self._trade_stats = {'total': 0, 'buy_fills': 0, 'sell_fills': 0, 'cycles': 0, 'wins': 0, 'realized_pnl': Decimal('0'), 'ticks': Decimal('0'), 'fees': Decimal('0'), 'inventory_sells_count': 0, 'inventory_sells_qty': Decimal('0'), 'inventory_sells_quote': Decimal('0')}
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
@@ -143,7 +144,8 @@ class MainWindow(QMainWindow):
         for n,w in [('ENGINE',self.cs_state),('BUY STATE',self.cs_buy_status),('SELL STATE',self.cs_sell_status),('BUY TOP',self.cs_top_bid_status),('SELL TOP',self.cs_top_ask_status),('BUY EXPOSURE',self.cs_avail_buy_usdt),('SELL EXPOSURE',self.cs_avail_sell_qty),(f"{self._pair_config.base_asset} Value",self.cs_inv_base_value),(f"{self._pair_config.quote_asset} Value",self.cs_inv_quote_value),(f"Inventory Ratio {self._pair_config.base_asset} / {self._pair_config.quote_asset}",self.cs_inv_ratio),('Inventory Drift',self.cs_inv_drift),('PnL',self.cs_pnl),('Trades',self.cs_trades),('Winrate',self.cs_winrate),('LAST FILL',self.cs_last_fill)]: cf.addRow(n,w)
         stats_box=QGroupBox('Trade Stats'); sf=QFormLayout(stats_box)
         self.ts_total=QLabel('0'); self.ts_buy_fills=QLabel('0'); self.ts_sell_fills=QLabel('0'); self.ts_cycles=QLabel('0'); self.ts_winrate=QLabel('0.0%'); self.ts_realized=QLabel('0.00000000'); self.ts_avg=QLabel('0.00000000'); self.ts_ticks=QLabel('0.00'); self.ts_fees=QLabel('0.00000000'); self.ts_runtime=QLabel('0s')
-        for n,w in [('Trades total',self.ts_total),('BUY fills',self.ts_buy_fills),('SELL fills',self.ts_sell_fills),('Completed cycles',self.ts_cycles),('Winrate %',self.ts_winrate),('Realized PnL',self.ts_realized),('Avg profit / trade',self.ts_avg),('Spread captured ticks',self.ts_ticks),('Fees',self.ts_fees),('Session runtime',self.ts_runtime)]: sf.addRow(n,w)
+        self.ts_inventory_sells=QLabel('0'); self.ts_inventory_qty=QLabel('0.00000000'); self.ts_inventory_quote=QLabel('0.00000000')
+        for n,w in [('Trades total',self.ts_total),('BUY fills',self.ts_buy_fills),('SELL fills',self.ts_sell_fills),('Completed cycles',self.ts_cycles),('Inventory sells count',self.ts_inventory_sells),('Inventory sells qty',self.ts_inventory_qty),('Inventory sells quote',self.ts_inventory_quote),('Winrate %',self.ts_winrate),('Realized PnL',self.ts_realized),('Avg profit / trade',self.ts_avg),('Spread captured ticks',self.ts_ticks),('Fees',self.ts_fees),('Session runtime',self.ts_runtime)]: sf.addRow(n,w)
         center=QGroupBox('Open Orders'); cl=QVBoxLayout(center); self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(['side','price','qty','filled','remain','age','top-status']); self.table.itemSelectionChanged.connect(self._on_order_selected); self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); cl.addWidget(self.table); self.no_orders=QLabel('No open orders'); cl.addWidget(self.no_orders)
         spread_box=QGroupBox('Spread Stability'); sl=QFormLayout(spread_box)
         self.ss_ticks=QLabel('-'); self.ss_lifetime=QLabel('-'); self.ss_bid=QLabel('-'); self.ss_ask=QLabel('-'); self.ss_ratio=QLabel('-'); self.ss_collapse=QLabel('0')
@@ -286,6 +288,7 @@ class MainWindow(QMainWindow):
             return
         if name=='market':
             self._last_market_snapshot=dict(payload)
+            self._last_market_ts = time.time()
             metrics=self._spread_engine.observe(Decimal(str(payload.get('bid',0))), Decimal(str(payload.get('ask',0))), float(payload.get('latency_ms',0)))
             self._spread_metrics=metrics
             self._set_label_text(self.ss_ticks, f"raw={metrics.snapshot.spread:.8f} | ticks={metrics.snapshot.spread_ticks:.2f}")
@@ -368,7 +371,7 @@ class MainWindow(QMainWindow):
     def _on_sell_fill(self, qty: Decimal, price: Decimal):
         self._trade_stats['total'] += 1
         self._trade_stats['sell_fills'] += 1
-        fee_rate = Decimal(str(self.cfg.get('fee_rate', 0.001) or 0.001))
+        taker_fee_rate = Decimal(str(self.cfg.get('fee_rate', self._pair_config.taker_fee_rate) or self._pair_config.taker_fee_rate))
         remaining = qty
         matched_qty = Decimal('0')
         buy_notional = Decimal('0')
@@ -382,11 +385,16 @@ class MainWindow(QMainWindow):
             if lot['qty'] <= 0:
                 self._trade_lots.pop(0)
         if matched_qty <= 0:
+            self._trade_stats['inventory_sells_count'] += 1
+            self._trade_stats['inventory_sells_qty'] += qty
+            self._trade_stats['inventory_sells_quote'] += qty * price
             self.logger.log('INFO', f'[TRADE] inventory_sell qty={qty:.8f} sell={price:.8f}')
             return
         avg_buy = buy_notional / matched_qty
         gross = matched_qty * (price - avg_buy)
-        fees = (matched_qty * avg_buy + matched_qty * price) * fee_rate
+        buy_fee_quote = (matched_qty * avg_buy) * taker_fee_rate
+        sell_fee_quote = (matched_qty * price) * taker_fee_rate
+        fees = buy_fee_quote + sell_fee_quote
         realized = gross - fees
         tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
         ticks = ((price - avg_buy) / tick) if tick > 0 else Decimal('0')
@@ -396,7 +404,7 @@ class MainWindow(QMainWindow):
         self._trade_stats['ticks'] += ticks
         if realized > 0:
             self._trade_stats['wins'] += 1
-        self.logger.log('INFO', f'[PNL] realized={realized:.8f} total={self._trade_stats["realized_pnl"]:.8f} fees={fees:.8f}')
+        self.logger.log('INFO', f'[PNL] gross={gross:.8f} fees={fees:.8f} realized={realized:.8f} total={self._trade_stats["realized_pnl"]:.8f}')
         self.logger.log('INFO', f'[TRADE] completed qty={matched_qty:.8f} buy={avg_buy:.8f} sell={price:.8f} ticks={ticks:.2f}')
 
     def _risk_ok(self) -> tuple[bool, str]:
@@ -605,7 +613,7 @@ class MainWindow(QMainWindow):
             min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
             min_sell_free = min_qty if min_qty > 0 else Decimal(str(self.cfg.get('min_sell_free_euri', 1.0)))
             if available_sell_qty <= Decimal('0') and not c.sell_order_id:
-                self.cs_top_ask_status.setText('DISABLED_NO_INV')
+                self.cs_top_ask_status.setText('NO BTC TO SELL')
                 self.logger.log('INFO', '[SELL] disabled no exchange inventory')
             elif net_inv > max_short and exchange_free_euri >= min_sell_free:
                 if not c.sell_order_id and c.buy_filled_qty > 0:
@@ -815,8 +823,11 @@ class MainWindow(QMainWindow):
         self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
         spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
         self._data_mode = 'WS' if self.ws.status.state == 'OK' else 'REST'
-        stale = (time.time() - self._balance_live_last_refresh) > (self._balance_live_interval_sec * 3)
-        self._status_badges['DATA'].setText(f'DATA WS {"OK" if self._data_mode=="WS" else "OFF"} | REST OK | STALE {"YES" if stale else "NO"}')
+        stale_timeout_ms = int(self.cfg.get('market_stale_ms', 3000) or 3000)
+        market_age_ms = int((time.time() - self._last_market_ts) * 1000) if self._last_market_ts > 0 else 10**9
+        stale = market_age_ms > stale_timeout_ms
+        data_status = 'DATA STALE' if stale else ('DATA WS OK' if self._data_mode == 'WS' else 'DATA REST OK')
+        self._status_badges['DATA'].setText(data_status)
         if self._data_mode != self._last_data_mode:
             self.logger.log('INFO', '[DATA] WS active' if self._data_mode == 'WS' else '[DATA] REST fallback')
             self._last_data_mode = self._data_mode
@@ -834,8 +845,8 @@ class MainWindow(QMainWindow):
         cycles = max(1, self._trade_stats['cycles'])
         winrate = (Decimal(self._trade_stats['wins']) / Decimal(cycles) * Decimal('100')) if self._trade_stats['cycles'] > 0 else Decimal('0')
         avg = (self._trade_stats['realized_pnl'] / Decimal(cycles)) if self._trade_stats['cycles'] > 0 else Decimal('0')
-        self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s")
-        self.cs_trades.setText(str(self._trade_stats['total'])); self.cs_winrate.setText(f"{winrate:.2f}%")
+        self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s")
+        self.cs_trades.setText(str(self._trade_stats['total'])); self.cs_winrate.setText(f"{winrate:.2f}%"); self.cs_pnl.setText(f"{self._trade_stats['realized_pnl']:.8f}")
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(True)
         self._paint_status()
         self._run_live_cycle()
@@ -852,7 +863,8 @@ class MainWindow(QMainWindow):
         self._set_label_color(self._status_badges['CONNECTED'], '#4caf50' if self._private_ok else '#f44336')
         spread_state = self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'
         self._set_label_color(self._status_badges['SPREAD'], '#4caf50' if spread_state == 'READY' else ('#fbc02d' if spread_state == 'WATCH' else '#9e9e9e'))
-        self._set_label_color(self._status_badges['DATA'], '#4caf50' if self._data_mode == 'WS' else '#fbc02d')
+        data_state = self._status_badges['DATA'].text()
+        self._set_label_color(self._status_badges['DATA'], '#f44336' if data_state == 'DATA STALE' else ('#4caf50' if self._data_mode == 'WS' else '#fbc02d'))
         risk_ok, _ = self._risk_ok()
         self._set_label_color(self._status_badges['RISK'], '#4caf50' if risk_ok else '#f44336')
         self._set_label_color(self._status_badges['HARVEST'], '#4caf50' if self._private_ok else '#fbc02d')
