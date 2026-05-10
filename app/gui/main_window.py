@@ -150,6 +150,8 @@ class MainWindow(QMainWindow):
         self._trade_ledger = TradeLedger()
         self._trade_stats = {}
         self._portfolio_baseline = None
+        self._closed_event_sell_ids: set[int] = set()
+        self._sell_filled_events_by_qty: dict[str, int] = {}
         self._init_services(); self._build_ui(); self._refresh_trade_stats_from_ledger(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
@@ -834,6 +836,31 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self.logger.log('INFO', f'[LEDGER] snapshot pnl={snap["realized_pnl"]:.8f} trades={snap["completed_cycles"]} open={snap["open_position_qty"]:.8f}')
         self.logger.log('INFO', f'[STATS] trading_realized={snap["realized_pnl"]:.8f} portfolio_pnl={self.cs_portfolio_pnl.text()} closed={snap["closed_sell_events"]} turnover={snap["turnover_quote"]:.8f}')
 
+    def _extract_sell_fill_price(self, status_payload: dict, fallback_price: Decimal) -> Decimal:
+        executed = Decimal(str(status_payload.get('executedQty', '0') or '0'))
+        quoted = Decimal(str(status_payload.get('cummulativeQuoteQty', '0') or '0'))
+        if executed > 0 and quoted > 0:
+            avg = quoted / executed
+            self.logger.log('INFO', f'[LEDGER] sell_avg={avg:.8f}')
+            return avg
+        return Decimal(str(status_payload.get('price') or fallback_price or '0'))
+
+    def _finalize_closed_position(self, sell_order_id: int | None, reason: str = 'SELL_FILLED') -> None:
+        c = self._cycle
+        if c.open_position_qty > Decimal('0'):
+            self.logger.log('INFO', f'[LEDGER] position closed qty_before={c.open_position_qty:.8f}')
+        c.open_position_qty = Decimal('0')
+        c.state = CycleState.WAIT_READY
+        self._exit_buy_disabled_logged = False
+        self._sl_pending_started_mono = 0.0
+        self._clear_buy_runtime_order()
+        self._clear_sell_runtime_order(sell_order_id)
+        if sell_order_id and sell_order_id not in self._closed_event_sell_ids:
+            self._closed_event_sell_ids.add(sell_order_id)
+            snap = self._trade_ledger.snapshot()
+            self.logger.log('INFO', f'[CYCLE] CLOSED pnl={snap.get("last_closed_trade_pnl", Decimal("0")):+.8f} -> FLAT ready_for_next_buy')
+        self.logger.log('INFO', f'[RECON] forced flat from balances reason={reason}')
+
     def _mid_price_for_portfolio(self) -> Decimal:
         bid = Decimal(str(self._last_market_snapshot.get('bid', '0') if self._last_market_snapshot else '0'))
         ask = Decimal(str(self._last_market_snapshot.get('ask', '0') if self._last_market_snapshot else '0'))
@@ -1184,6 +1211,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self._clear_sell_runtime_order()
                 if had_stale:
                     self.logger.log('INFO', '[RECON] FLAT stale ids cleared')
+            base_free = Decimal(str(self._balances.get('BASE_free', 0) or 0))
+            base_locked = Decimal(str(self._balances.get('BASE_locked', 0) or 0))
+            has_live_sell = any(str(o.get('side', '')).upper() == 'SELL' for o in self._last_open_orders)
+            if c.open_position_qty > min_qty_runtime and not c.buy_order_id and not c.sell_order_id and not has_live_sell and base_locked <= min_qty_runtime:
+                self.logger.log('INFO', '[RECON] forced flat from balances')
+                self._finalize_closed_position(None, 'BALANCE_RECON_FLAT')
             if now_mono - self._last_chain_diag_mono >= 3.0:
                 buy_price = Decimal(str(self._orders_by_id.get(int(c.buy_order_id or 0), {}).get('price') or '0'))
                 sell_price = Decimal(str(self._orders_by_id.get(int(c.sell_order_id or 0), {}).get('price') or '0'))
@@ -1496,25 +1529,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             exec_qty = Decimal(str(st.get('executedQty', '0')))
                             delta = exec_qty - c.sell_filled_qty
                             if delta > 0:
-                                c.apply_sell_fill(delta, Decimal(str(st.get('price') or ask)))
+                                fill_price = self._extract_sell_fill_price(st, ask)
+                                c.apply_sell_fill(delta, fill_price)
                                 self.logger.log('INFO', f'[SELL] fill qty={delta}')
-                                self._on_sell_fill(delta, Decimal(str(st.get('price') or ask)))
+                                self.logger.log('INFO', f'[LEDGER] SELL fill applied qty={delta:.8f}')
+                                self._on_sell_fill(delta, fill_price)
                                 min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
                                 if c.open_position_qty <= min_qty:
-                                    self._clear_buy_runtime_order()
-                                    live_sell_position_exists = any(
-                                        int(o.get('orderId')) != int(c.sell_order_id or -1)
-                                        and str(o.get('side', '')).upper() == 'SELL'
-                                        and c.open_position_qty > min_qty
-                                        for o in self._last_open_orders
-                                    )
-                                    if not live_sell_position_exists:
-                                        self._clear_sell_runtime_order()
-                                    c.state = CycleState.WAIT_READY
-                                    self._exit_buy_disabled_logged = False
-                                    self._sl_pending_started_mono = 0.0
-                                    snap = self._trade_ledger.snapshot()
-                                    self.logger.log('INFO', f'[CYCLE] CLOSED pnl={snap.get("last_closed_trade_pnl", Decimal("0")):+.8f} -> FLAT ready_for_next_buy')
+                                    self._finalize_closed_position(c.sell_order_id, 'SELL_DELTA_FILLED')
                                 # GUI updates are timer-driven only (SELL branch).
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                                 # GUI updates are timer-driven only (SELL branch).
@@ -1536,10 +1558,19 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self.logger.log('INFO', '[RUNTIME] registry cleaned')
                         self.logger.log('INFO', '[RUNTIME] optimistic cleared')
                     if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids) and not sell_grace_active:
+                        if sell_status == 'FILLED':
+                            self._finalize_closed_position(c.sell_order_id, 'SELL_FILLED_RECON')
                         self.logger.log('INFO', f'[RECON] cleared stale SELL id={c.sell_order_id} status={sell_status or "UNKNOWN_ORDER"}')
                         self._clear_sell_runtime_order(c.sell_order_id)
                         if c.open_position_qty <= min_qty_runtime:
                             self.logger.log('INFO', '[INV] cleanup sell finished, harvest can continue')
+                    qty_key = f"{c.open_position_qty:.8f}"
+                    if sell_status == 'FILLED':
+                        self._sell_filled_events_by_qty[qty_key] = self._sell_filled_events_by_qty.get(qty_key, 0) + 1
+                        has_live_sell = any(str(o.get('side', '')).upper() == 'SELL' for o in self._last_open_orders)
+                        if self._sell_filled_events_by_qty.get(qty_key, 0) >= 2 and c.open_position_qty > min_qty_runtime and not has_live_sell:
+                            self.logger.log('INFO', '[RECON] ghost position detected')
+                            self._finalize_closed_position(c.sell_order_id, 'GHOST_POSITION_KILLER')
                     # GUI updates are timer-driven only (SELL branch).
                     # GUI updates are timer-driven only (SELL branch).
                     # GUI updates are timer-driven only (SELL branch).
