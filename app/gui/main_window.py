@@ -633,6 +633,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         if len(payload) != prev_count:
             self.logger.log('INFO', f'[ORDERS] count changed {prev_count}->{len(payload)}')
         open_ids={int(o.get('orderId')) for o in payload if o.get('orderId')}
+        self._reconcile_runtime_order_ids(open_ids)
         if self._active_buy_order_id and self._active_buy_order_id not in open_ids:
             self.logger.log('INFO', f'[RUNTIME] active BUY resolved id={self._active_buy_order_id}')
             self._quote_birth.pop(self._active_buy_order_id, None)
@@ -642,6 +643,35 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self._quote_birth.pop(self._active_sell_order_id, None)
             self._active_sell_order_id=None
             self._pending_sell_order=None
+
+    def _clear_buy_runtime_order(self, stale_id=None):
+        stale = stale_id if stale_id is not None else self._cycle.buy_order_id
+        if stale is not None:
+            self._quote_birth.pop(stale, None)
+        self._cycle.buy_order_id = None
+        self._active_buy_order_id = None
+        self._pending_buy_order = None
+        self._pending_buy_grace_until = 0.0
+
+    def _clear_sell_runtime_order(self, stale_id=None):
+        stale = stale_id if stale_id is not None else self._cycle.sell_order_id
+        if stale is not None:
+            self._quote_birth.pop(stale, None)
+        self._cycle.sell_order_id = None
+        self._active_sell_order_id = None
+        self._pending_sell_order = None
+        self._pending_sell_grace_until = 0.0
+
+    def _reconcile_runtime_order_ids(self, live_order_ids):
+        c = self._cycle
+        buy_id = c.buy_order_id
+        sell_id = c.sell_order_id
+        if buy_id and buy_id not in live_order_ids:
+            self._clear_buy_runtime_order(buy_id)
+            self.logger.log('INFO', f'[RECON] cleared stale BUY id={buy_id}')
+        if sell_id and sell_id not in live_order_ids:
+            self._clear_sell_runtime_order(sell_id)
+            self.logger.log('INFO', f'[RECON] cleared stale SELL id={sell_id}')
     def has_active_buy(self) -> bool: return self._active_buy_order_id is not None
     def has_active_sell(self) -> bool: return self._active_sell_order_id is not None
 
@@ -986,12 +1016,19 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
             net_inv = c.net_inventory_euri
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
+            self._reconcile_runtime_order_ids(open_order_ids)
 
             buy_grace_active = c.buy_order_id and time.time() < self._pending_buy_grace_until
             sell_grace_active = c.sell_order_id and time.time() < self._pending_sell_grace_until
             min_qty_runtime = Decimal(str(filters.get('minQty', '0') or '0'))
             has_open_position = c.open_position_qty > min_qty_runtime
             position_mode = 'LONG_OPEN' if has_open_position else 'FLAT'
+            if position_mode == 'FLAT' and c.open_position_qty <= min_qty_runtime and len(open_order_ids) == 0:
+                had_stale = bool(c.buy_order_id or c.sell_order_id or self._active_buy_order_id or self._active_sell_order_id or self._pending_buy_order or self._pending_sell_order)
+                self._clear_buy_runtime_order()
+                self._clear_sell_runtime_order()
+                if had_stale:
+                    self.logger.log('INFO', '[RECON] FLAT stale ids cleared')
             self._log_throttled('runtime_diag', f"[RUNTIME] state={position_mode} spread={spread_ticks} fill={fill_state} buy_order={c.buy_order_id or '-'} sell_order={c.sell_order_id or '-'} open_qty={c.open_position_qty}", 5.0)
 
             # BUY engine (independent)
@@ -1005,7 +1042,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10))) * inv['buy_mult']
             min_buy_free = Decimal(str(self.cfg.get('min_buy_free_usdt', 5.0)))
             soft_limit = Decimal(str(self.cfg.get('inventory_soft_limit', 0.65)))
-            buy_allowed = (position_mode == 'FLAT') and (not exit_only_mode) and inv['ratio'] <= soft_limit and not c.buy_order_id and c.open_position_qty <= min_qty_runtime
+            buy_order_live = bool(c.buy_order_id and c.buy_order_id in open_order_ids)
+            buy_allowed = (position_mode == 'FLAT') and (not exit_only_mode) and inv['ratio'] <= soft_limit and (not buy_order_live) and c.open_position_qty <= min_qty_runtime
             if exit_only_mode and c.buy_order_id:
                 try:
                     self.orders.cancel(c.buy_order_id)
@@ -1027,7 +1065,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 if exit_only_mode:
                     pass
                 elif not buy_allowed:
-                    block_reason = 'position_open' if position_mode != 'FLAT' else ('buy_order_active' if c.buy_order_id else ('inventory_limit' if inv['ratio'] > soft_limit else 'exit_only'))
+                    block_reason = 'position_open' if position_mode != 'FLAT' else ('buy_order_active' if buy_order_live else ('inventory_limit' if inv['ratio'] > soft_limit else 'exit_only'))
                     self._log_throttled('block_buy_'+block_reason, f'[BLOCK] buy reason={block_reason}', 5.0)
                 buy_status = None
                 if buy_allowed:
