@@ -28,6 +28,7 @@ class TradeLedger:
         self.realized_pnl = Decimal('0')
         self.fees = Decimal('0')
         self.completed_cycles = 0
+        self.closed_lots = 0
         self.winning_cycles = 0
         self.losing_cycles = 0
         self.spread_captured_ticks_total = Decimal('0')
@@ -35,6 +36,7 @@ class TradeLedger:
         self.sell_fills = 0
         self.inventory_sell_fills = 0
         self.last_closed_trade_pnl = Decimal('0')
+        self.last_closed_trade_ticks = Decimal('0')
         self.last_fill = FillEvent('NONE', Decimal('0'), Decimal('0'), Decimal('0'), 0.0)
 
     def record_buy(self, qty: Decimal, price: Decimal, fee: Decimal = Decimal('0'), timestamp: float | None = None) -> dict[str, Any]:
@@ -76,9 +78,11 @@ class TradeLedger:
             self.matched_sell_qty += matched_qty
             self.realized_pnl += realized
             self.last_closed_trade_pnl = realized
+            self.last_closed_trade_ticks = ticks
             self.fees += fees
             self.spread_captured_ticks_total += ticks
             self.completed_cycles += 1
+            self.closed_lots += 1
             if realized > 0:
                 self.winning_cycles += 1
             elif realized < 0:
@@ -99,6 +103,8 @@ class TradeLedger:
         avg_buy = (self.total_buy_quote / self.total_buy_qty) if self.total_buy_qty > 0 else Decimal('0')
         avg_sell = (self.total_sell_quote / self.total_sell_qty) if self.total_sell_qty > 0 else Decimal('0')
         winrate = (Decimal(self.winning_cycles) / Decimal(self.completed_cycles) * Decimal('100')) if self.completed_cycles else Decimal('0')
+        turnover_quote = self.total_buy_quote + self.total_sell_quote
+        matched_volume_quote = self.total_sell_quote - self.inventory_sell_quote
         return {
             'total_buy_qty': self.total_buy_qty,
             'total_buy_quote': self.total_buy_quote,
@@ -107,6 +113,8 @@ class TradeLedger:
             'matched_sell_qty': self.matched_sell_qty,
             'inventory_sell_qty': self.inventory_sell_qty,
             'inventory_sell_quote': self.inventory_sell_quote,
+            'turnover_quote': turnover_quote,
+            'matched_volume_quote': matched_volume_quote,
             'realized_pnl': self.realized_pnl,
             'fees': self.fees,
             'completed_cycles': self.completed_cycles,
@@ -122,10 +130,13 @@ class TradeLedger:
             'buy_fills': self.buy_fills,
             'sell_fills': self.sell_fills,
             'closed_trades': self.completed_cycles,
+            'closed_sell_events': self.completed_cycles,
+            'closed_lots': self.closed_lots,
             'wins': self.winning_cycles,
             'losses': self.losing_cycles,
             'inventory_sell_fills': self.inventory_sell_fills,
             'last_closed_trade_pnl': self.last_closed_trade_pnl,
+            'last_closed_trade_ticks': self.last_closed_trade_ticks,
             'total_fills': self.buy_fills + self.sell_fills,
             'last_fill': self.last_fill,
         }
