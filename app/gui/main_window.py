@@ -56,6 +56,7 @@ class TradeSettingsDialog(QDialog):
         l = QFormLayout(self)
         self.symbol = QLineEdit(str(cfg.get('symbol', 'EURIUSDT')))
         self.min_spread_ticks = QLineEdit(str(cfg.get('min_spread_ticks', 2))); self.target_profit_ticks = QLineEdit(str(cfg.get('target_profit_ticks', 1))); self.stable_ms = QLineEdit(str(cfg.get('min_stable_ms', 3000)))
+        self.entry_aggr_ticks = QLineEdit(str(cfg.get('entry_aggr_ticks', 0))); self.exit_aggr_ticks = QLineEdit(str(cfg.get('exit_aggr_ticks', 0))); self.max_aggr_spread_pct = QLineEdit(str(cfg.get('max_aggr_spread_pct', 0.25)))
         self.allow_partial = QCheckBox('YES'); self.allow_partial.setChecked(bool(cfg.get('allow_partial_fills', True))); self.min_partial = QLineEdit(str(cfg.get('min_partial_fill_euri', 0)))
         self.reprice_on_move = QCheckBox('YES'); self.reprice_on_move.setChecked(bool(cfg.get('reprice_on_move', True))); self.cancel_on_collapse = QCheckBox('YES'); self.cancel_on_collapse.setChecked(bool(cfg.get('cancel_on_spread_collapse', True)))
         self.max_buy_exposure = QLineEdit(str(cfg.get('max_buy_usdt_exposure', 10)))
@@ -65,10 +66,10 @@ class TradeSettingsDialog(QDialog):
         self.soft_inv = QLineEdit(str(cfg.get('inventory_soft_limit', 0.65)))
         self.hard_inv = QLineEdit(str(cfg.get('inventory_hard_limit', 0.80)))
         l.addRow('Mode', QLabel('LIVE TRADE'))
-        for n,w in [('Symbol',self.symbol),('Max BUY exposure USDT',self.max_buy_exposure),('Max SELL exposure USDT',self.max_sell_exposure),('Target inv ratio',self.target_inv),('Inv soft limit',self.soft_inv),('Inv hard limit',self.hard_inv),('Min spread ticks',self.min_spread_ticks),('Target profit ticks',self.target_profit_ticks),('Min stable ms',self.stable_ms),('Allow partial fills',self.allow_partial),('Min partial fill EURI',self.min_partial),('Reprice on bid/ask move',self.reprice_on_move),('Cancel on spread collapse',self.cancel_on_collapse),('Risk guard',self.risk_guard)]: l.addRow(n,w)
+        for n,w in [('Symbol',self.symbol),('Max BUY exposure USDT',self.max_buy_exposure),('Max SELL exposure USDT',self.max_sell_exposure),('Target inv ratio',self.target_inv),('Inv soft limit',self.soft_inv),('Inv hard limit',self.hard_inv),('Min spread ticks',self.min_spread_ticks),('Target profit ticks',self.target_profit_ticks),('Min stable ms',self.stable_ms),('Entry aggr ticks',self.entry_aggr_ticks),('Exit aggr ticks',self.exit_aggr_ticks),('Max aggr spread %',self.max_aggr_spread_pct),('Allow partial fills',self.allow_partial),('Min partial fill EURI',self.min_partial),('Reprice on bid/ask move',self.reprice_on_move),('Cancel on spread collapse',self.cancel_on_collapse),('Risk guard',self.risk_guard)]: l.addRow(n,w)
         row=QHBoxLayout(); row.addWidget(QPushButton('Save', clicked=self._save)); row.addWidget(QPushButton('Close', clicked=self.reject)); l.addRow(row)
     def _save(self):
-        self._on_save({'symbol': self.symbol.text().strip() or 'EURIUSDT', 'harvest_mode': 'LIVE_TRADE', 'min_spread_ticks': int(self.min_spread_ticks.text() or 2), 'target_profit_ticks': int(self.target_profit_ticks.text() or 1), 'min_stable_ms': int(self.stable_ms.text() or 3000), 'max_buy_usdt_exposure': float(self.max_buy_exposure.text() or 10), 'max_sell_usdt_exposure': float(self.max_sell_exposure.text() or 10), 'target_inventory_ratio': float(self.target_inv.text() or 0.5), 'inventory_soft_limit': float(self.soft_inv.text() or 0.65), 'inventory_hard_limit': float(self.hard_inv.text() or 0.8), 'allow_partial_fills': self.allow_partial.isChecked(), 'min_partial_fill_euri': float(self.min_partial.text() or 0), 'reprice_on_move': self.reprice_on_move.isChecked(), 'cancel_on_spread_collapse': self.cancel_on_collapse.isChecked(), 'risk_guard_enabled': self.risk_guard.isChecked()}); self.accept()
+        self._on_save({'symbol': self.symbol.text().strip() or 'EURIUSDT', 'harvest_mode': 'LIVE_TRADE', 'min_spread_ticks': int(self.min_spread_ticks.text() or 2), 'target_profit_ticks': int(self.target_profit_ticks.text() or 1), 'min_stable_ms': int(self.stable_ms.text() or 3000), 'max_buy_usdt_exposure': float(self.max_buy_exposure.text() or 10), 'max_sell_usdt_exposure': float(self.max_sell_exposure.text() or 10), 'target_inventory_ratio': float(self.target_inv.text() or 0.5), 'entry_aggr_ticks': int(self.entry_aggr_ticks.text() or 0), 'exit_aggr_ticks': int(self.exit_aggr_ticks.text() or 0), 'max_aggr_spread_pct': float(self.max_aggr_spread_pct.text() or 0.25), 'inventory_soft_limit': float(self.soft_inv.text() or 0.65), 'inventory_hard_limit': float(self.hard_inv.text() or 0.8), 'allow_partial_fills': self.allow_partial.isChecked(), 'min_partial_fill_euri': float(self.min_partial.text() or 0), 'reprice_on_move': self.reprice_on_move.isChecked(), 'cancel_on_spread_collapse': self.cancel_on_collapse.isChecked(), 'risk_guard_enabled': self.risk_guard.isChecked()}); self.accept()
 
 class ManualOrderDialog(QDialog):
     def __init__(self, main, parent=None):
@@ -174,9 +175,9 @@ class MainWindow(QMainWindow):
         self._status_balance_usdt=QLabel('QUOTE - / locked -'); l.addWidget(self._status_balance_usdt)
         main.addWidget(top)
         split=QSplitter(Qt.Horizontal)
-        left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_pair_profile=QLabel('-'); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
+        left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_pair_profile=QLabel('-'); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_entry_aggr=QLabel(); self.ts_exit_aggr=QLabel(); self.ts_max_aggr_pct=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
         self.pair_selector = QComboBox(); self.pair_selector.addItems(list_pairs()); self.pair_selector.currentTextChanged.connect(self._on_pair_selected)
-        for n,w in [('PAIR',self.pair_selector),('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Pair profile',self.ts_pair_profile),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
+        for n,w in [('PAIR',self.pair_selector),('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Pair profile',self.ts_pair_profile),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Entry aggr ticks',self.ts_entry_aggr),('Exit aggr ticks',self.ts_exit_aggr),('Max aggr spread %',self.ts_max_aggr_pct),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         self.start_button = QPushButton('HARVEST OFF')
         self.start_button.setCheckable(True)
         self.start_button.toggled.connect(self.toggle_harvest)
@@ -424,18 +425,45 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         return bid, ask
 
     def _safe_maker_buy_price(self, bid: Decimal, ask: Decimal, tick: Decimal) -> Decimal:
-        price = floor_to_tick(bid, tick)
+        base_price = floor_to_tick(bid, tick)
+        spread_ticks = Decimal('0')
+        if tick > 0 and ask > bid:
+            spread_ticks = (ask - bid) / tick
+        min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
+        aggr_ticks = 0
+        if spread_ticks >= min_spread_ticks and tick > 0:
+            requested = max(0, int(self.cfg.get('entry_aggr_ticks', 0) or 0))
+            max_pct = max(0.0, float(self.cfg.get('max_aggr_spread_pct', 0.25) or 0.25))
+            max_aggr_ticks = int((spread_ticks * Decimal(str(max_pct))).to_integral_value(rounding='ROUND_FLOOR'))
+            aggr_ticks = min(requested, max_aggr_ticks)
+        price = floor_to_tick(bid + (tick * aggr_ticks), tick) if tick > 0 else base_price
         if price >= ask and tick > 0:
             price = floor_to_tick(ask - tick, tick)
+        if price != base_price:
+            self.logger.log('INFO', f'[AGGR] BUY base={base_price} aggr_ticks={aggr_ticks} final={price}')
         return price
 
     def _safe_maker_sell_price(self, target_tp_price: Decimal, bid: Decimal, ask: Decimal, tick: Decimal) -> Decimal:
-        maker_sell_price = max(target_tp_price, ask)
+        base_price = floor_to_tick(max(target_tp_price, ask), tick)
+        spread_ticks = Decimal('0')
+        if tick > 0 and ask > bid:
+            spread_ticks = (ask - bid) / tick
+        min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
+        aggr_ticks = 0
+        if spread_ticks >= min_spread_ticks and tick > 0:
+            requested = max(0, int(self.cfg.get('exit_aggr_ticks', 0) or 0))
+            max_pct = max(0.0, float(self.cfg.get('max_aggr_spread_pct', 0.25) or 0.25))
+            max_aggr_ticks = int((spread_ticks * Decimal(str(max_pct))).to_integral_value(rounding='ROUND_FLOOR'))
+            aggr_ticks = min(requested, max_aggr_ticks)
+        maker_sell_price = ask - (tick * aggr_ticks) if tick > 0 else ask
+        maker_sell_price = max(target_tp_price, maker_sell_price)
         if maker_sell_price <= bid and tick > 0:
             maker_sell_price = bid + tick
         sell_price = floor_to_tick(maker_sell_price, tick)
         if sell_price <= bid and tick > 0:
             sell_price = floor_to_tick(bid + tick, tick)
+        if sell_price != base_price:
+            self.logger.log('INFO', f'[AGGR] SELL base={base_price} aggr_ticks={aggr_ticks} final={sell_price}')
         return sell_price
 
     def _place_safe_maker_buy(self, qty: Decimal, reason: str = ''):
@@ -1502,7 +1530,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def _balance_euri(self): return f"{Decimal(str(self._balances.get('BASE_free',0))):.8f}"
     def _sync_trade_settings_labels(self):
         self.cfg['harvest_mode'] = 'LIVE_TRADE'
-        self.ts_symbol.setText(str(self.cfg.get('symbol','EURIUSDT'))); self.ts_mode.setText('LIVE TRADE'); self.ts_pair_profile.setText(self._pair_config.profile); self.ts_buy_exp.setText(str(self.cfg.get('max_buy_usdt_exposure',10))); self.ts_sell_exp.setText(str(self.cfg.get('max_sell_usdt_exposure',10))); self.ts_min.setText(str(self.cfg.get('min_spread_ticks',2))); self.ts_profit.setText(str(self.cfg.get('target_profit_ticks',1))); self.ts_stable.setText(str(self.cfg.get('min_stable_ms',3000))); self.ts_partial.setText('YES' if self.cfg.get('allow_partial_fills',True) else 'NO'); self.ts_min_partial.setText(str(self.cfg.get('min_partial_fill_euri',0))); self.ts_reprice.setText('YES' if self.cfg.get('reprice_on_move',True) else 'NO'); self.ts_collapse.setText('YES' if self.cfg.get('cancel_on_spread_collapse',True) else 'NO'); self.ts_risk.setText('ON' if self.cfg.get('risk_guard_enabled',False) else 'OFF')
+        self.ts_symbol.setText(str(self.cfg.get('symbol','EURIUSDT'))); self.ts_mode.setText('LIVE TRADE'); self.ts_pair_profile.setText(self._pair_config.profile); self.ts_buy_exp.setText(str(self.cfg.get('max_buy_usdt_exposure',10))); self.ts_sell_exp.setText(str(self.cfg.get('max_sell_usdt_exposure',10))); self.ts_min.setText(str(self.cfg.get('min_spread_ticks',2))); self.ts_profit.setText(str(self.cfg.get('target_profit_ticks',1))); self.ts_stable.setText(str(self.cfg.get('min_stable_ms',3000))); self.ts_entry_aggr.setText(str(self.cfg.get('entry_aggr_ticks',0))); self.ts_exit_aggr.setText(str(self.cfg.get('exit_aggr_ticks',0))); self.ts_max_aggr_pct.setText(str(self.cfg.get('max_aggr_spread_pct',0.25))); self.ts_partial.setText('YES' if self.cfg.get('allow_partial_fills',True) else 'NO'); self.ts_min_partial.setText(str(self.cfg.get('min_partial_fill_euri',0))); self.ts_reprice.setText('YES' if self.cfg.get('reprice_on_move',True) else 'NO'); self.ts_collapse.setText('YES' if self.cfg.get('cancel_on_spread_collapse',True) else 'NO'); self.ts_risk.setText('ON' if self.cfg.get('risk_guard_enabled',False) else 'OFF')
         if self.pair_selector.currentText() != self.cfg.get('symbol'):
             self.pair_selector.blockSignals(True); self.pair_selector.setCurrentText(self.cfg.get('symbol')); self.pair_selector.blockSignals(False)
         self._sync_cycle_state_labels()
