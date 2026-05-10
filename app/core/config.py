@@ -30,6 +30,11 @@ DEFAULT_CONFIG = {
     'risk_guard_enabled': False,
     'max_long_inventory_euri': 500.0,
     'max_short_inventory_euri': -500.0,
+    'target_inventory_ratio': 0.50,
+    'inventory_soft_limit': 0.65,
+    'inventory_hard_limit': 0.80,
+    'min_buy_free_usdt': 5.0,
+    'min_sell_free_euri': 1.0,
 }
 
 
