@@ -665,13 +665,32 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         s = self._trade_ledger.snapshot()
         cycles = max(1, s['completed_cycles'])
         avg = (s['realized_pnl'] / Decimal(cycles)) if s['completed_cycles'] > 0 else Decimal('0')
-        self.ts_total.setText(str(s['total_fills'])); self.ts_buy_fills.setText(str(s['buy_fills'])); self.ts_sell_fills.setText(str(s['sell_fills']))
-        self.ts_bought_qty.setText(f"{s['total_buy_qty']:.8f}"); self.ts_sold_qty.setText(f"{s['total_sell_qty']:.8f}"); self.ts_open_position_qty.setText(f"{s['open_position_qty']:.8f}")
-        self.ts_avg_buy_price.setText(f"{s['avg_buy']:.8f}"); self.ts_avg_sell_price.setText(f"{s['avg_sell']:.8f}"); self.ts_realized.setText(f"{s['realized_pnl']:.8f}")
-        self.ts_cycles.setText(str(s['completed_cycles'])); self.ts_winrate.setText(f"{s['winrate']:.2f}%"); self.ts_fees.setText(f"{s['fees']:.8f}"); self.ts_avg.setText(f"{avg:.8f}")
-        self.ts_bought_quote.setText(f"{s['total_buy_quote']:.8f}"); self.ts_sold_quote.setText(f"{s['total_sell_quote']:.8f}"); self.ts_matched_sold_qty.setText(f"{s['matched_sell_qty']:.8f}")
-        self.ts_inventory_qty.setText(f"{s['inventory_sell_qty']:.8f}"); self.ts_inventory_quote.setText(f"{s['inventory_sell_quote']:.8f}"); self.ts_ticks.setText(f"{s['spread_captured_ticks_total']:.2f}")
-        self.cs_trades.setText(str(s['total_fills'])); self.cs_winrate.setText(f"{s['winrate']:.2f}%"); self.cs_pnl.setText(f"{s['realized_pnl']:.8f}")
+        updates = [
+            ('ts_total', self.ts_total, str(s['total_fills'])),
+            ('ts_buy_fills', self.ts_buy_fills, str(s['buy_fills'])),
+            ('ts_sell_fills', self.ts_sell_fills, str(s['sell_fills'])),
+            ('ts_bought_qty', self.ts_bought_qty, f"{s['total_buy_qty']:.8f}"),
+            ('ts_sold_qty', self.ts_sold_qty, f"{s['total_sell_qty']:.8f}"),
+            ('ts_open_position_qty', self.ts_open_position_qty, f"{s['open_position_qty']:.8f}"),
+            ('ts_avg_buy_price', self.ts_avg_buy_price, f"{s['avg_buy']:.8f}"),
+            ('ts_avg_sell_price', self.ts_avg_sell_price, f"{s['avg_sell']:.8f}"),
+            ('ts_realized', self.ts_realized, f"{s['realized_pnl']:.8f}"),
+            ('ts_cycles', self.ts_cycles, str(s['completed_cycles'])),
+            ('ts_winrate', self.ts_winrate, f"{s['winrate']:.2f}%"),
+            ('ts_fees', self.ts_fees, f"{s['fees']:.8f}"),
+            ('ts_avg', self.ts_avg, f"{avg:.8f}"),
+            ('ts_bought_quote', self.ts_bought_quote, f"{s['total_buy_quote']:.8f}"),
+            ('ts_sold_quote', self.ts_sold_quote, f"{s['total_sell_quote']:.8f}"),
+            ('ts_matched_sold_qty', self.ts_matched_sold_qty, f"{s['matched_sell_qty']:.8f}"),
+            ('ts_inventory_qty', self.ts_inventory_qty, f"{s['inventory_sell_qty']:.8f}"),
+            ('ts_inventory_quote', self.ts_inventory_quote, f"{s['inventory_sell_quote']:.8f}"),
+            ('ts_ticks', self.ts_ticks, f"{s['spread_captured_ticks_total']:.2f}"),
+            ('cs_trades', self.cs_trades, str(s['total_fills'])),
+            ('cs_winrate', self.cs_winrate, f"{s['winrate']:.2f}%"),
+            ('cs_pnl', self.cs_pnl, f"{s['realized_pnl']:.8f}"),
+        ]
+        for key, label, value in updates:
+            self._safe_label_set(label, value, key=key)
 
     def _risk_ok(self) -> tuple[bool, str]:
         if not self.cfg.get('trading_enabled', False):
