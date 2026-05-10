@@ -533,9 +533,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             if qty_n <= 0:
                 self.logger.log('RISK', f'[RISK] blocked: SELL notional exceeds cap notional={raw_notional:.8f} cap={sell_cap:.8f}')
                 return None
+        min_notional = Decimal(str(self._symbol_filters.get('minNotional', '0') or '0'))
         qty_s = format_decimal_for_step(qty_n, step)
         try:
             notional = qty_n * Decimal(price)
+            if notional < min_notional:
+                self.logger.log('RISK', f'[RISK] blocked: SELL notional below min notional={notional:.8f} min={min_notional:.8f}')
+                return None
             resp = self.orders.place_limit_maker('SELL', qty_s, price)
             self.logger.log('INFO', f'[ORDER] SELL placed qty={qty_s} price={price} notional={notional:.8f}')
             return resp
@@ -555,6 +559,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             return None
                         qty_s = format_decimal_for_step(qty_n, step)
                         retry_notional = qty_n * Decimal(retry_price)
+                    if retry_notional < min_notional:
+                        self.logger.log('RISK', f'[RISK] blocked: SELL retry notional below min notional={retry_notional:.8f} min={min_notional:.8f}')
+                        return None
                     resp = self.orders.place_limit_maker('SELL', qty_s, retry_price)
                     self.logger.log('INFO', f'[ORDER] SELL placed qty={qty_s} price={retry_price} notional={retry_notional:.8f}')
                     return resp
