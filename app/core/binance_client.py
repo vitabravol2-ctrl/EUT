@@ -93,6 +93,9 @@ class BinanceClient:
 
     def create_limit_maker_order(self, symbol: str, side: str, quantity: str, price: str) -> dict:
         return self._request('POST', '/api/v3/order', params={'symbol': symbol, 'side': side, 'type': 'LIMIT_MAKER', 'quantity': quantity, 'price': price}, signed=True)
+    
+    def create_market_order(self, symbol: str, side: str, quantity: str) -> dict:
+        return self._request('POST', '/api/v3/order', params={'symbol': symbol, 'side': side, 'type': 'MARKET', 'quantity': quantity}, signed=True)
 
     def cancel_order(self, symbol: str, order_id: int) -> dict:
         return self._request('DELETE', '/api/v3/order', params={'symbol': symbol, 'orderId': order_id}, signed=True)

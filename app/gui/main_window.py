@@ -1555,7 +1555,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     else:
                         sell_capacity_total = floor_to_step(min(position_qty, exchange_free_euri + active_sell_remaining_qty), step)
                     exposure_target_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
-                    target_sell_qty = min(floor_to_step(max(Decimal('0'), c.open_position_qty), step), exposure_target_qty) if has_open_position else Decimal('0')
+                    target_sell_qty = self._compute_position_exit_sell_qty(position_qty, step) if has_open_position else Decimal('0')
                     capacity_signature = (str(exchange_free_euri), str(active_sell_remaining_qty), str(target_sell_qty))
                     if capacity_signature != self._sell_capacity_signature:
                         self.logger.log('INFO', f'[SELL] capacity total free={exchange_free_euri} active_remaining={active_sell_remaining_qty} total={sell_capacity_total}')
@@ -1623,30 +1623,40 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._set_exit_reason('TP_EXIT')
                         sell_cap = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10) or 10))
                         if has_open_position:
-                            base_position_qty = c.open_position_qty if enable_inventory_cleanup else position_qty
-                            sell_qty = floor_to_step(min(base_position_qty, exposure_target_qty), step)
-                            if not enable_inventory_cleanup:
-                                sell_qty = min(sell_qty, floor_to_step(exchange_free_euri + active_sell_remaining_qty, step))
+                            sell_qty = self._compute_position_exit_sell_qty(position_qty, step)
+                            sell_qty = self._ensure_position_exit_invariant(sell_qty, position_qty, step)
                             mode = 'POSITION'
                         else:
                             sell_qty = min(exchange_free_euri, floor_to_step(sell_cap / ask, step) if ask > 0 else Decimal('0')) if enable_inventory_cleanup else Decimal('0')
                             mode = 'INVENTORY_CLEANUP' if enable_inventory_cleanup else 'DISABLED'
                         sell_qty = floor_to_step(sell_qty, step)
                         self.logger.log('INFO', f'[SIZE] SELL qty={sell_qty:.8f} price={ask:.8f} cap={sell_cap:.8f} mode={mode}')
+                        if mode == 'POSITION':
+                            self.logger.log('INFO', f'[EXIT] position_qty={position_qty:.8f}')
+                            self.logger.log('INFO', f'[EXIT] computed_sell_qty={sell_qty:.8f}')
+                            self.logger.log('INFO', '[EXIT] cap_bypass=POSITION_EXIT')
                         if not has_open_position and exchange_free_euri > min_qty_runtime and enable_inventory_cleanup:
                             self.logger.log('INFO', '[INV] cleanup mode')
                         elif not has_open_position and exchange_free_euri > min_qty_runtime and not enable_inventory_cleanup:
                             self._log_throttled('inventory_cleanup_disabled', f'[INV] ignored old inventory qty={exchange_free_euri:.8f}', 10.0)
                         if has_open_position and not enable_inventory_cleanup:
-                            if abs(sell_qty - floor_to_step(position_qty, step)) > step:
-                                self.logger.log('ERROR', f'[ERROR] position sell qty mismatch sell_qty={sell_qty:.8f} position_qty={position_qty:.8f} step={step:.8f}')
-                                sell_qty = Decimal('0')
+                            sell_qty = self._ensure_position_exit_invariant(sell_qty, position_qty, step)
                         if sell_qty < min_qty:
                             self._log_throttled('block_sell_no_qty', '[BLOCK] sell reason=no_qty', 5.0)
                         elif sell_qty > 0:
                             tp_price = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
                             min_exit = max(tp_price, bid + tick)
                             if exit_only_mode:
+                                if sl_triggered and has_open_position and not c.sell_order_id:
+                                    self.logger.log('INFO', '[EXIT] emergency_exit_triggered')
+                                    resp = self.orders.place_market('SELL', f"{sell_qty:.8f}")
+                                    c.sell_order_id = int(resp.get('orderId', 0) or 0) or None
+                                    c.sell_requested_qty = sell_qty
+                                    self._active_sell_order_id = c.sell_order_id
+                                    self._pending_sell_order = None
+                                    self._pending_sell_grace_until = 0.0
+                                    self.logger.log('INFO', f'[EXIT] emergency MARKET SELL qty={sell_qty:.8f}')
+                                    continue
                                 sell_age = max(0, time.time() - self._sell_started_at) if self._sell_started_at else 0
                                 emergency_loss_ticks = Decimal(str(self.cfg.get('emergency_loss_ticks', 50) or 50))
                                 emergency_floor = c.buy_avg_price - (emergency_loss_ticks * tick)
@@ -1773,6 +1783,16 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         if sell_age < 60:
             return avg_buy
         return max(best_bid + tick, emergency_floor)
+
+    def _compute_position_exit_sell_qty(self, position_qty: Decimal, step: Decimal) -> Decimal:
+        return floor_to_step(max(Decimal('0'), Decimal(str(position_qty))), step)
+
+    def _ensure_position_exit_invariant(self, sell_qty: Decimal, position_qty: Decimal, step: Decimal) -> Decimal:
+        expected_qty = self._compute_position_exit_sell_qty(position_qty, step)
+        if abs(sell_qty - expected_qty) <= step:
+            return sell_qty
+        self.logger.log('CRITICAL', f'[EXIT] invariant violation mode=POSITION sell_qty={sell_qty:.8f} expected={expected_qty:.8f} step={step:.8f}')
+        return expected_qty
 
 
     def _order_age_ms(self, order_id: int | None) -> int:
