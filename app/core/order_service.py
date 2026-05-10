@@ -8,6 +8,9 @@ class OrderService:
         self.client = client
         self.symbol = symbol
 
+    def set_symbol(self, symbol: str) -> None:
+        self.symbol = symbol
+
     def place_limit(self, side: str, qty: str, price: str) -> dict:
         start = time.perf_counter()
         resp = self.client.create_limit_order(self.symbol, side=side, quantity=qty, price=price)

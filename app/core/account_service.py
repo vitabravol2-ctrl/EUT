@@ -4,25 +4,33 @@ from decimal import Decimal
 
 
 class AccountService:
-    def __init__(self, client) -> None:
+    def __init__(self, client, base_asset: str = 'EURI', quote_asset: str = 'USDT') -> None:
         self.client = client
+        self.base_asset = base_asset
+        self.quote_asset = quote_asset
+
+    def set_assets(self, base_asset: str, quote_asset: str) -> None:
+        self.base_asset = base_asset
+        self.quote_asset = quote_asset
 
     def balances(self, last_price: Decimal = Decimal('0')) -> dict:
         data = self.client.get_account()
         balances = {x['asset']: x for x in data.get('balances', []) if isinstance(x, dict)}
-        euri = balances.get('EURI', {'free': '0', 'locked': '0'})
-        usdt = balances.get('USDT', {'free': '0', 'locked': '0'})
-        euri_free = Decimal(str(euri.get('free', 0) or 0))
-        euri_locked = Decimal(str(euri.get('locked', 0) or 0))
-        usdt_free = Decimal(str(usdt.get('free', 0) or 0))
-        usdt_locked = Decimal(str(usdt.get('locked', 0) or 0))
-        euri_total = euri_free + euri_locked
-        usdt_total = usdt_free + usdt_locked
-        equity_usdt = usdt_total + (euri_total * Decimal(str(last_price or 0)))
+        base = balances.get(self.base_asset, {'free': '0', 'locked': '0'})
+        quote = balances.get(self.quote_asset, {'free': '0', 'locked': '0'})
+        base_free = Decimal(str(base.get('free', 0) or 0))
+        base_locked = Decimal(str(base.get('locked', 0) or 0))
+        quote_free = Decimal(str(quote.get('free', 0) or 0))
+        quote_locked = Decimal(str(quote.get('locked', 0) or 0))
+        base_total = base_free + base_locked
+        quote_total = quote_free + quote_locked
+        equity_quote = quote_total + (base_total * Decimal(str(last_price or 0)))
         return {
-            'EURI_free': euri_free,
-            'EURI_locked': euri_locked,
-            'USDT_free': usdt_free,
-            'USDT_locked': usdt_locked,
-            'equity_usdt': equity_usdt,
+            'base_asset': self.base_asset,
+            'quote_asset': self.quote_asset,
+            'BASE_free': base_free,
+            'BASE_locked': base_locked,
+            'QUOTE_free': quote_free,
+            'QUOTE_locked': quote_locked,
+            'equity_quote': equity_quote,
         }
