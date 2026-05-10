@@ -559,6 +559,19 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         s = self._trade_ledger.snapshot()
         self._trade_stats = {'total': s['total_fills'], 'buy_fills': s['buy_fills'], 'sell_fills': s['sell_fills'], 'cycles': s['completed_cycles'], 'wins': s['winning_cycles'], 'realized_pnl': s['realized_pnl'], 'ticks': s['spread_captured_ticks_total'], 'fees': s['fees'], 'inventory_sells_count': int(s['inventory_sell_qty'] > 0), 'inventory_sells_qty': s['inventory_sell_qty'], 'inventory_sells_quote': s['inventory_sell_quote']}
 
+
+    def _update_runtime_stats_from_ledger(self):
+        s = self._trade_ledger.snapshot()
+        cycles = max(1, s['completed_cycles'])
+        avg = (s['realized_pnl'] / Decimal(cycles)) if s['completed_cycles'] > 0 else Decimal('0')
+        self.ts_total.setText(str(s['total_fills'])); self.ts_buy_fills.setText(str(s['buy_fills'])); self.ts_sell_fills.setText(str(s['sell_fills']))
+        self.ts_bought_qty.setText(f"{s['total_buy_qty']:.8f}"); self.ts_sold_qty.setText(f"{s['total_sell_qty']:.8f}"); self.ts_open_position_qty.setText(f"{s['open_position_qty']:.8f}")
+        self.ts_avg_buy_price.setText(f"{s['avg_buy']:.8f}"); self.ts_avg_sell_price.setText(f"{s['avg_sell']:.8f}"); self.ts_realized.setText(f"{s['realized_pnl']:.8f}")
+        self.ts_cycles.setText(str(s['completed_cycles'])); self.ts_winrate.setText(f"{s['winrate']:.2f}%"); self.ts_fees.setText(f"{s['fees']:.8f}"); self.ts_avg.setText(f"{avg:.8f}")
+        self.ts_bought_quote.setText(f"{s['total_buy_quote']:.8f}"); self.ts_sold_quote.setText(f"{s['total_sell_quote']:.8f}"); self.ts_matched_sold_qty.setText(f"{s['matched_sell_qty']:.8f}")
+        self.ts_inventory_qty.setText(f"{s['inventory_sell_qty']:.8f}"); self.ts_inventory_quote.setText(f"{s['inventory_sell_quote']:.8f}"); self.ts_ticks.setText(f"{s['spread_captured_ticks_total']:.2f}")
+        self.cs_trades.setText(str(s['total_fills'])); self.cs_winrate.setText(f"{s['winrate']:.2f}%"); self.cs_pnl.setText(f"{s['realized_pnl']:.8f}")
+
     def _risk_ok(self) -> tuple[bool, str]:
         if not self.cfg.get('trading_enabled', False):
             return False, 'trading disabled'
@@ -763,6 +776,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             # BUY engine (independent)
             inv = self._inventory_metrics()
             inv_mode, inv_risk, _ = self._inventory_risk_state(inv['ratio'])
+            risk_state = inv_risk if inv_risk else 'OK'
             available_buy_usdt = Decimal(str(self._balances.get('QUOTE_free', 0)))
             buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10))) * inv['buy_mult']
             min_buy_free = Decimal(str(self.cfg.get('min_buy_free_usdt', 5.0)))
@@ -786,7 +800,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
                                 self.logger.log('INFO', f'[BUY] fill qty={delta}')
                                 self._on_buy_fill(delta, Decimal(str(st.get('price') or bid)))
+                                self._update_runtime_stats_from_ledger()
                                 self._refresh_balances_live('buy_fill')
+                                self._update_runtime_stats_from_ledger()
                                 self._refresh_orders_live('buy_fill')
                                 self.logger.log('INFO', '[SELL] increase quote qty=inventory refresh')
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
@@ -853,117 +869,110 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self._buy_top_state = 'TOP'
 
             # SELL maintain (exchange-balance driven only)
-            exchange_free_euri = Decimal(str(self._balances.get('BASE_free', 0)))
-            pending_sell_qty = Decimal('0')
-            if c.sell_order_id:
-                so = self._orders_by_id.get(c.sell_order_id, {})
-                pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
-            available_for_sell = floor_to_step(max(Decimal('0'), exchange_free_euri), step)
-            available_sell_qty = floor_to_step(max(Decimal('0'), exchange_free_euri), step)
-            self.cs_avail_sell_qty.setText(str(available_sell_qty))
-            self.cs_pending_sell_qty.setText(str(pending_sell_qty))
-            self.cs_avail_buy_usdt.setText(f"{available_buy_usdt:.2f}")
-            self.cs_inv_exposure.setText('-')
-            min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
-            min_sell_free = min_qty if min_qty > 0 else Decimal(str(self.cfg.get('min_sell_free_euri', 1.0)))
-            if available_sell_qty <= Decimal('0') and not c.sell_order_id:
-                self.cs_top_ask_status.setText('NO BTC TO SELL')
-                self.logger.log('INFO', '[SELL] disabled no exchange inventory')
-            elif net_inv > max_short and exchange_free_euri >= min_sell_free:
-                if not c.sell_order_id and c.buy_filled_qty > 0:
-                    self.logger.log('INFO', f'[SELL] inventory detected qty={exchange_free_euri}')
-                sell_status = None
+            try:
+                exchange_free_euri = Decimal(str(self._balances.get('BASE_free', 0)))
+                pending_sell_qty = Decimal('0')
                 if c.sell_order_id:
-                    try:
-                        st = self.orders.order_status(c.sell_order_id)
-                        sell_status = safe_status(st)
-                        self.cs_sell_status.setText(str(sell_status))
-                        exec_qty = Decimal(str(st.get('executedQty', '0')))
-                        delta = exec_qty - c.sell_filled_qty
-                        if delta > 0:
-                            c.apply_sell_fill(delta, Decimal(str(st.get('price') or ask)))
-                            self.logger.log('INFO', f'[SELL] fill qty={delta}')
-                            self._on_sell_fill(delta, Decimal(str(st.get('price') or ask)))
-                            self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
-                            self._refresh_balances_live('sell_fill')
-                            self._refresh_orders_live('sell_fill')
-                    except Exception as e:
-                        self.logger.log('INFO', f'[RUNTIME] reconcile SELL status fetch failed -> {e}')
-                        sell_status = None
-                if c.sell_order_id and c.sell_order_id in open_order_ids:
-                    self._log_throttled('sell_active', '[SELL] active', 45.0)
-                    if self._pending_sell_order == c.sell_order_id:
-                        self._pending_sell_order = None
-                        self._pending_sell_grace_until = 0.0
-                if c.sell_order_id and c.sell_order_id not in open_order_ids and sell_grace_active:
-                    pass
-                elif c.sell_order_id and c.sell_order_id not in open_order_ids:
-                    self.logger.log('INFO', '[RUNTIME] SELL vanished -> reconciled')
-                    self.logger.log('INFO', '[RUNTIME] reconcile SELL')
-                    self.logger.log('INFO', '[RUNTIME] registry cleaned')
-                    self.logger.log('INFO', '[RUNTIME] optimistic cleared')
-                if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids) and not sell_grace_active:
-                    c.sell_order_id = None
-                    self._active_sell_order_id = None
-                    self._pending_sell_order = None
-                    self._pending_sell_grace_until = 0.0
-                self._refresh_balances_live('pre_sell_compute')
-                self._refresh_orders_live('pre_sell_compute')
-                exchange_free_euri = floor_to_step(max(Decimal('0'), Decimal(str(self._balances.get('BASE_free', 0)))), step)
-                max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10))) * inv['sell_mult']
-                active_sell_remaining_qty = Decimal('0')
-                if c.sell_order_id and c.sell_order_id in open_order_ids:
-                    os = self._orders_by_id.get(c.sell_order_id, {})
-                    active_sell_remaining_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
-                sell_capacity_total = floor_to_step(exchange_free_euri + active_sell_remaining_qty, step)
-                exposure_target_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
-                target_sell_qty = min(sell_capacity_total, exposure_target_qty)
-                capacity_signature = (str(exchange_free_euri), str(active_sell_remaining_qty), str(target_sell_qty))
-                if capacity_signature != self._sell_capacity_signature:
-                    self.logger.log('INFO', f'[SELL] capacity total free={exchange_free_euri} active_remaining={active_sell_remaining_qty} total={sell_capacity_total}')
-                    self._sell_capacity_signature = capacity_signature
-                min_resize_delta_cfg = Decimal(str(self.cfg.get('min_resize_delta_euri', 1.0)))
-                min_resize_delta = max(step * Decimal('5'), Decimal(str(self.cfg.get('min_partial_fill_euri', 0))), min_resize_delta_cfg)
-                if c.sell_order_id and c.sell_order_id in open_order_ids and ask > 0 and not sell_grace_active:
-                    os = self._orders_by_id.get(c.sell_order_id, {})
-                    working_price = Decimal(str(os.get('price') or ask))
-                    working_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
-                    new_tp_price = floor_to_tick(max(ask, c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)), tick)
-                    same_price = abs(working_price - new_tp_price) < tick if tick > 0 else (working_price == new_tp_price)
-                    same_qty = abs(working_qty - target_sell_qty) < step if step > 0 else (working_qty == target_sell_qty)
-                    if same_price and same_qty:
-                        pass
-                        pass
-                    qty_delta = abs(target_sell_qty - working_qty)
-                    if target_sell_qty > 0 and ask == working_price and qty_delta < min_resize_delta:
-                        pass
-                        pass
-                    elif target_sell_qty > 0 and ask != working_price and (abs(ask - working_price) / tick if tick > 0 else Decimal('0')) >= Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1)))):
-                        quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
-                        min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
-                        if quote_age_ms < min_quote_lifetime_ms:
-                            pass
-                        else:
-                            self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={ask}')
-                            self.orders.cancel(c.sell_order_id)
-                            self._quote_birth.pop(c.sell_order_id, None)
-                            c.sell_order_id = None
-                            self._active_sell_order_id = None
+                    so = self._orders_by_id.get(c.sell_order_id, {})
+                    pending_sell_qty = floor_to_step(max(Decimal('0'), Decimal(str(so.get('origQty') or '0')) - Decimal(str(so.get('executedQty') or '0'))), step)
+                available_for_sell = floor_to_step(max(Decimal('0'), exchange_free_euri), step)
+                available_sell_qty = floor_to_step(max(Decimal('0'), exchange_free_euri), step)
+                self.cs_avail_sell_qty.setText(str(available_sell_qty))
+                self.cs_pending_sell_qty.setText(str(pending_sell_qty))
+                self.cs_avail_buy_usdt.setText(f"{available_buy_usdt:.2f}")
+                self.cs_inv_exposure.setText('-')
+                min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
+                min_sell_free = min_qty if min_qty > 0 else Decimal(str(self.cfg.get('min_sell_free_euri', 1.0)))
+                if available_sell_qty <= Decimal('0') and not c.sell_order_id:
+                    self.cs_top_ask_status.setText('NO BTC TO SELL')
+                    self.logger.log('INFO', '[SELL] disabled no exchange inventory')
+                elif net_inv > max_short and exchange_free_euri >= min_sell_free:
+                    if not c.sell_order_id and c.buy_filled_qty > 0:
+                        self.logger.log('INFO', f'[SELL] inventory detected qty={exchange_free_euri}')
+                    sell_status = None
+                    if c.sell_order_id:
+                        try:
+                            st = self.orders.order_status(c.sell_order_id)
+                            sell_status = safe_status(st)
+                            self.cs_sell_status.setText(str(sell_status))
+                            exec_qty = Decimal(str(st.get('executedQty', '0')))
+                            delta = exec_qty - c.sell_filled_qty
+                            if delta > 0:
+                                c.apply_sell_fill(delta, Decimal(str(st.get('price') or ask)))
+                                self.logger.log('INFO', f'[SELL] fill qty={delta}')
+                                self._on_sell_fill(delta, Decimal(str(st.get('price') or ask)))
+                                self._update_runtime_stats_from_ledger()
+                                self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
+                                self._refresh_balances_live('sell_fill')
+                                self._update_runtime_stats_from_ledger()
+                                self._refresh_orders_live('sell_fill')
+                        except Exception as e:
+                            self.logger.log('INFO', f'[RUNTIME] reconcile SELL status fetch failed -> {e}')
+                            sell_status = None
+                    if c.sell_order_id and c.sell_order_id in open_order_ids:
+                        self._log_throttled('sell_active', '[SELL] active', 45.0)
+                        if self._pending_sell_order == c.sell_order_id:
                             self._pending_sell_order = None
                             self._pending_sell_grace_until = 0.0
-                    elif target_sell_qty > 0 and qty_delta >= min_resize_delta and target_sell_qty < working_qty:
-                        self.logger.log('INFO', f'[SELL] resize requested old_qty={working_qty} new_qty={target_sell_qty}')
-                        self.logger.log('INFO', '[SELL] cancel for resize')
-                        self.orders.cancel(c.sell_order_id)
-                        self.logger.log('INFO', '[SELL] resize confirmed')
-                        self._refresh_balances_live('sell_resize_cancel', force=True)
-                        self._refresh_orders_live('sell_resize_cancel', force=True)
+                    if c.sell_order_id and c.sell_order_id not in open_order_ids and sell_grace_active:
+                        pass
+                    elif c.sell_order_id and c.sell_order_id not in open_order_ids:
+                        self.logger.log('INFO', '[RUNTIME] SELL vanished -> reconciled')
+                        self.logger.log('INFO', '[RUNTIME] reconcile SELL')
+                        self.logger.log('INFO', '[RUNTIME] registry cleaned')
+                        self.logger.log('INFO', '[RUNTIME] optimistic cleared')
+                    if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids) and not sell_grace_active:
                         c.sell_order_id = None
                         self._active_sell_order_id = None
                         self._pending_sell_order = None
                         self._pending_sell_grace_until = 0.0
-                    elif target_sell_qty > working_qty and qty_delta >= min_resize_delta:
-                        if exchange_free_euri >= min_resize_delta:
+                    self._refresh_balances_live('pre_sell_compute')
+                    self._update_runtime_stats_from_ledger()
+                    self._refresh_orders_live('pre_sell_compute')
+                    self._update_runtime_stats_from_ledger()
+                    exchange_free_euri = floor_to_step(max(Decimal('0'), Decimal(str(self._balances.get('BASE_free', 0)))), step)
+                    max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10))) * inv['sell_mult']
+                    active_sell_remaining_qty = Decimal('0')
+                    if c.sell_order_id and c.sell_order_id in open_order_ids:
+                        os = self._orders_by_id.get(c.sell_order_id, {})
+                        active_sell_remaining_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
+                    sell_capacity_total = floor_to_step(exchange_free_euri + active_sell_remaining_qty, step)
+                    exposure_target_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
+                    target_sell_qty = min(sell_capacity_total, exposure_target_qty)
+                    capacity_signature = (str(exchange_free_euri), str(active_sell_remaining_qty), str(target_sell_qty))
+                    if capacity_signature != self._sell_capacity_signature:
+                        self.logger.log('INFO', f'[SELL] capacity total free={exchange_free_euri} active_remaining={active_sell_remaining_qty} total={sell_capacity_total}')
+                        self._sell_capacity_signature = capacity_signature
+                    min_resize_delta_cfg = Decimal(str(self.cfg.get('min_resize_delta_euri', 1.0)))
+                    min_resize_delta = max(step * Decimal('5'), Decimal(str(self.cfg.get('min_partial_fill_euri', 0))), min_resize_delta_cfg)
+                    if c.sell_order_id and c.sell_order_id in open_order_ids and ask > 0 and not sell_grace_active:
+                        os = self._orders_by_id.get(c.sell_order_id, {})
+                        working_price = Decimal(str(os.get('price') or ask))
+                        working_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
+                        new_tp_price = floor_to_tick(max(ask, c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)), tick)
+                        same_price = abs(working_price - new_tp_price) < tick if tick > 0 else (working_price == new_tp_price)
+                        same_qty = abs(working_qty - target_sell_qty) < step if step > 0 else (working_qty == target_sell_qty)
+                        if same_price and same_qty:
+                            pass
+                            pass
+                        qty_delta = abs(target_sell_qty - working_qty)
+                        if target_sell_qty > 0 and ask == working_price and qty_delta < min_resize_delta:
+                            pass
+                            pass
+                        elif target_sell_qty > 0 and ask != working_price and (abs(ask - working_price) / tick if tick > 0 else Decimal('0')) >= Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1)))):
+                            quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
+                            min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
+                            if quote_age_ms < min_quote_lifetime_ms:
+                                pass
+                            else:
+                                self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={ask}')
+                                self.orders.cancel(c.sell_order_id)
+                                self._quote_birth.pop(c.sell_order_id, None)
+                                c.sell_order_id = None
+                                self._active_sell_order_id = None
+                                self._pending_sell_order = None
+                                self._pending_sell_grace_until = 0.0
+                        elif target_sell_qty > 0 and qty_delta >= min_resize_delta and target_sell_qty < working_qty:
                             self.logger.log('INFO', f'[SELL] resize requested old_qty={working_qty} new_qty={target_sell_qty}')
                             self.logger.log('INFO', '[SELL] cancel for resize')
                             self.orders.cancel(c.sell_order_id)
@@ -974,94 +983,109 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._active_sell_order_id = None
                             self._pending_sell_order = None
                             self._pending_sell_grace_until = 0.0
-                        else:
-                            self.logger.log('INFO', '[SELL] resize up skipped insufficient new free inventory')
-                if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
-                    sell_qty = floor_to_step(min(exchange_free_euri, target_sell_qty), step)
-                    if sell_qty < min_qty:
-                        self.logger.log('INFO', '[SELL] skipped: no free inventory after refresh')
-                    elif sell_qty > 0:
-                        min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
-                        price = floor_to_tick(max(ask, min_exit), tick)
-                        self.logger.log('INFO', '[EXIT] unload mode') if risk in ('HEAVY', 'DANGER') else None
-                        self.logger.log('INFO', f'[SELL] TP protected qty={sell_qty} price={price}') if ask < min_exit else None
-                        try:
-                            resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
-                        except Exception as e:
-                            if 'insufficient' in str(e).lower() and 'balance' in str(e).lower():
-                                self._refresh_balances_live('sell_balance_error', force=True)
-                                self._refresh_orders_live('sell_balance_error', force=True)
-                                if c.sell_order_id and c.sell_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}:
-                                    c.sell_order_id = None
-                                    self._active_sell_order_id = None
+                        elif target_sell_qty > working_qty and qty_delta >= min_resize_delta:
+                            if exchange_free_euri >= min_resize_delta:
+                                self.logger.log('INFO', f'[SELL] resize requested old_qty={working_qty} new_qty={target_sell_qty}')
+                                self.logger.log('INFO', '[SELL] cancel for resize')
+                                self.orders.cancel(c.sell_order_id)
+                                self.logger.log('INFO', '[SELL] resize confirmed')
+                                self._refresh_balances_live('sell_resize_cancel', force=True)
+                                self._refresh_orders_live('sell_resize_cancel', force=True)
+                                c.sell_order_id = None
+                                self._active_sell_order_id = None
                                 self._pending_sell_order = None
                                 self._pending_sell_grace_until = 0.0
-                                self._last_reprice_at = time.time() + 3.0
-                                self.logger.log('INFO', '[SELL] blocked: insufficient free EURI after refresh')
-                                self.logger.log('INFO', '[SELL] cooldown after balance error')
-                                return
-                            raise
-                        c.sell_order_id = int(resp.get('orderId'))
-                        c.sell_requested_qty = sell_qty
-                        self._active_sell_order_id = c.sell_order_id
-                        self._pending_sell_order = c.sell_order_id
-                        self._pending_sell_grace_until = time.time() + self._order_visibility_grace_sec
-                        self._sell_started_at = time.time()
-                        self._quote_birth[c.sell_order_id] = time.time()
-                        self.cs_top_ask_status.setText('WORKING')
-                        self.logger.log('INFO', '[SELL] armed')
-                        self._refresh_orders_live('sell_place', force=True)
-                else:
-                    os = self._orders_by_id.get(c.sell_order_id, {})
-                    working_price = Decimal(str(os.get('price') or ask))
-                    min_reprice_ticks = Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
-                    min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
-                    protected_ask = max(ask, min_exit)
-                    tick_move = abs(protected_ask - working_price) / tick if tick > 0 else Decimal('0')
-                    quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
-                    min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
-                    if ask < min_exit:
-                        sell_age = max(0, time.time() - self._sell_started_at) if c.sell_order_id else 0
-                        relax_after = int(self.cfg.get('inventory_unload_relax_after_sec', 20) or 20)
-                        mode, risk, _ = self._inventory_risk_state(inv['ratio'])
-                        if risk in ('HEAVY', 'DANGER') and sell_age >= relax_after:
-                            if ask >= c.buy_avg_price + tick:
-                                self.logger.log('INFO', '[EXIT] TP relax to breakeven+1')
-                                protected_ask = max(ask, c.buy_avg_price + tick)
                             else:
-                                self.logger.log('INFO', '[EXIT] TP relax to breakeven')
-                                protected_ask = max(ask, c.buy_avg_price)
-                        else:
-                            self.logger.log('INFO', '[SELL] TP protected')
-                            self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
-                            pass
-                    elif available_sell_qty > Decimal('0') and protected_ask != working_price and protected_ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
-                        if working_price >= min_exit and protected_ask < working_price:
-                            self.logger.log('INFO', '[SELL] TP protected')
-                            self._sell_top_state = 'TOP'
-                            return
-                        self.cs_top_ask_status.setText('UNDERCUT')
-                        if self._sell_top_state == 'TOP':
-                            self.logger.log('INFO', '[SELL] top lost')
-                        self._sell_top_state = 'UNDERCUT'
-                        self.logger.log('INFO', '[SELL] undercut')
-                        if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
-                            self.cs_top_ask_status.setText('REPRICING')
-                            self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={protected_ask}')
+                                self.logger.log('INFO', '[SELL] resize up skipped insufficient new free inventory')
+                    if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
+                        sell_qty = floor_to_step(min(exchange_free_euri, target_sell_qty), step)
+                        if sell_qty < min_qty:
+                            self.logger.log('INFO', '[SELL] skipped: no free inventory after refresh')
+                        elif sell_qty > 0:
+                            min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
+                            price = floor_to_tick(max(ask, min_exit), tick)
+                            self.logger.log('INFO', '[EXIT] unload mode') if risk_state in ('HEAVY', 'DANGER') else None
+                            self.logger.log('INFO', f'[SELL] TP protected qty={sell_qty} price={price}') if ask < min_exit else None
                             try:
-                                self.orders.cancel(c.sell_order_id)
+                                resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
                             except Exception as e:
-                                self.logger.log('INFO', '[RUNTIME] cancel race ignored')
-                            self._quote_birth.pop(c.sell_order_id, None)
-                            c.sell_order_id = None
-                            self._active_sell_order_id = None
-                            self.logger.log('INFO', '[RUNTIME] repost continue')
-                            self._last_reprice_at = time.time()
+                                if 'insufficient' in str(e).lower() and 'balance' in str(e).lower():
+                                    self._refresh_balances_live('sell_balance_error', force=True)
+                                    self._refresh_orders_live('sell_balance_error', force=True)
+                                    if c.sell_order_id and c.sell_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}:
+                                        c.sell_order_id = None
+                                        self._active_sell_order_id = None
+                                    self._pending_sell_order = None
+                                    self._pending_sell_grace_until = 0.0
+                                    self._last_reprice_at = time.time() + 3.0
+                                    self.logger.log('INFO', '[SELL] blocked: insufficient free EURI after refresh')
+                                    self.logger.log('INFO', '[SELL] cooldown after balance error')
+                                    return
+                                raise
+                            c.sell_order_id = int(resp.get('orderId'))
+                            c.sell_requested_qty = sell_qty
+                            self._active_sell_order_id = c.sell_order_id
+                            self._pending_sell_order = c.sell_order_id
+                            self._pending_sell_grace_until = time.time() + self._order_visibility_grace_sec
+                            self._sell_started_at = time.time()
+                            self._quote_birth[c.sell_order_id] = time.time()
+                            self.cs_top_ask_status.setText('WORKING')
+                            self.logger.log('INFO', '[SELL] armed')
+                            self._refresh_orders_live('sell_place', force=True)
                     else:
-                        self.cs_top_ask_status.setText('TOP')
-                        if self._sell_top_state != 'TOP':
-                            self.logger.log('INFO', '[SELL] top acquired')
-                        self._sell_top_state = 'TOP'
+                        os = self._orders_by_id.get(c.sell_order_id, {})
+                        working_price = Decimal(str(os.get('price') or ask))
+                        min_reprice_ticks = Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
+                        min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
+                        protected_ask = max(ask, min_exit)
+                        tick_move = abs(protected_ask - working_price) / tick if tick > 0 else Decimal('0')
+                        quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
+                        min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
+                        if ask < min_exit:
+                            sell_age = max(0, time.time() - self._sell_started_at) if c.sell_order_id else 0
+                            relax_after = int(self.cfg.get('inventory_unload_relax_after_sec', 20) or 20)
+                            mode, risk_state, _ = self._inventory_risk_state(inv['ratio'])
+                            if risk_state in ('HEAVY', 'DANGER') and sell_age >= relax_after:
+                                if ask >= c.buy_avg_price + tick:
+                                    self.logger.log('INFO', '[EXIT] TP relax to breakeven+1')
+                                    protected_ask = max(ask, c.buy_avg_price + tick)
+                                else:
+                                    self.logger.log('INFO', '[EXIT] TP relax to breakeven')
+                                    protected_ask = max(ask, c.buy_avg_price)
+                            else:
+                                self.logger.log('INFO', '[SELL] TP protected')
+                                self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
+                                pass
+                        elif available_sell_qty > Decimal('0') and protected_ask != working_price and protected_ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
+                            if working_price >= min_exit and protected_ask < working_price:
+                                self.logger.log('INFO', '[SELL] TP protected')
+                                self._sell_top_state = 'TOP'
+                                return
+                            self.cs_top_ask_status.setText('UNDERCUT')
+                            if self._sell_top_state == 'TOP':
+                                self.logger.log('INFO', '[SELL] top lost')
+                            self._sell_top_state = 'UNDERCUT'
+                            self.logger.log('INFO', '[SELL] undercut')
+                            if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
+                                self.cs_top_ask_status.setText('REPRICING')
+                                self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={protected_ask}')
+                                try:
+                                    self.orders.cancel(c.sell_order_id)
+                                except Exception as e:
+                                    self.logger.log('INFO', '[RUNTIME] cancel race ignored')
+                                self._quote_birth.pop(c.sell_order_id, None)
+                                c.sell_order_id = None
+                                self._active_sell_order_id = None
+                                self.logger.log('INFO', '[RUNTIME] repost continue')
+                                self._last_reprice_at = time.time()
+                        else:
+                            self.cs_top_ask_status.setText('TOP')
+                            if self._sell_top_state != 'TOP':
+                                self.logger.log('INFO', '[SELL] top acquired')
+                            self._sell_top_state = 'TOP'
+    
+            except Exception as e:
+                self.logger.log('ERROR', f'[ERROR] sell branch failed: {e}')
 
             self.refresh_orders(True)
         except Exception as e:
@@ -1183,11 +1207,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self.logger.log('INFO', f"[INV] {inv['drift'].lower()}")
             self._last_inventory_log_signature=sig
         enabled=self._private_ok; self.cancel_all_btn.setEnabled(enabled); self.cancel_selected_btn.setEnabled(enabled and self._selected_order_id is not None)
-        s = self._trade_ledger.snapshot()
-        cycles = max(1, s['completed_cycles'])
-        avg = (s['realized_pnl'] / Decimal(cycles)) if s['completed_cycles'] > 0 else Decimal('0')
-        self.ts_total.setText(str(s['total_fills'])); self.ts_buy_fills.setText(str(s['buy_fills'])); self.ts_sell_fills.setText(str(s['sell_fills'])); self.ts_bought_qty.setText(f"{s['total_buy_qty']:.8f}"); self.ts_bought_quote.setText(f"{s['total_buy_quote']:.8f}"); self.ts_sold_qty.setText(f"{s['total_sell_qty']:.8f}"); self.ts_sold_quote.setText(f"{s['total_sell_quote']:.8f}"); self.ts_matched_sold_qty.setText(f"{s['matched_sell_qty']:.8f}"); self.ts_inventory_qty.setText(f"{s['inventory_sell_qty']:.8f}"); self.ts_inventory_quote.setText(f"{s['inventory_sell_quote']:.8f}"); self.ts_open_position_qty.setText(f"{s['open_position_qty']:.8f}"); self.ts_avg_buy_price.setText(f"{s['avg_buy']:.8f}"); self.ts_avg_sell_price.setText(f"{s['avg_sell']:.8f}"); self.ts_cycles.setText(str(s['completed_cycles'])); self.ts_winrate.setText(f"{s['winrate']:.2f}%"); self.ts_realized.setText(f"{s['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{s['spread_captured_ticks_total']:.2f}"); self.ts_fees.setText(f"{s['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders))); inv=self._inventory_metrics(); mode,risk,_=self._inventory_risk_state(inv['ratio']); self.cs_reason.setText(f"mode={mode} risk={risk} ratio={inv['ratio']*100:.1f}% exit_wait={int(max(0,time.time()-self._sell_started_at)) if self._active_sell_order_id else 0}s")
-        self.cs_trades.setText(str(s['total_fills'])); self.cs_winrate.setText(f"{s['winrate']:.2f}%"); self.cs_pnl.setText(f"{s['realized_pnl']:.8f}")
+        self._update_runtime_stats_from_ledger(); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders))); inv=self._inventory_metrics(); mode,risk,_=self._inventory_risk_state(inv['ratio']); self.cs_reason.setText(f"mode={mode} risk={risk} ratio={inv['ratio']*100:.1f}% exit_wait={int(max(0,time.time()-self._sell_started_at)) if self._active_sell_order_id else 0}s")
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(False); self._update_harvest_button()
         self._paint_status()
 
