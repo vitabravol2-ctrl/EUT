@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
         self._last_live_tick_log_at = 0.0
         self._trade_ledger = TradeLedger()
         self._trade_stats = {}
-        self._refresh_trade_stats_cache()
+        self._refresh_trade_stats_from_ledger()
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
@@ -630,18 +630,22 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def _on_buy_fill(self, qty: Decimal, price: Decimal):
         event = self._trade_ledger.record_buy(qty, price, fee=Decimal('0'), timestamp=time.time())
-        self._refresh_trade_stats_cache()
         self.logger.log('INFO', f'[LEDGER] BUY qty={qty:.8f} price={price:.8f} quote={event["quote"]:.8f} open_lots={event["open_lots"]}')
+        self._refresh_trade_stats_from_ledger()
+        snap = self._trade_ledger.snapshot()
+        self.logger.log('INFO', f'[LEDGER] snapshot pnl={snap["realized_pnl"]:.8f} trades={snap["completed_cycles"]} open={snap["open_position_qty"]:.8f}')
 
     def _on_sell_fill(self, qty: Decimal, price: Decimal):
         tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
         result = self._trade_ledger.record_sell(qty, price, fee=self._ledger_fee_rate(), tick_size=tick, timestamp=time.time())
-        self._refresh_trade_stats_cache()
         if result['matched_qty'] > 0:
             self.logger.log('INFO', f'[TRADE] completed qty={result["matched_qty"]:.8f} buy_avg={result["avg_buy"]:.8f} sell={price:.8f} pnl={result["realized"]:.8f} ticks={result["ticks"]:.2f}')
             self.logger.log('INFO', f'[PNL] realized={result["realized"]:.8f} total={self._trade_ledger.realized_pnl:.8f}')
         if result['inventory_qty'] > 0:
             self.logger.log('INFO', f'[INV_SELL] qty={result["inventory_qty"]:.8f} quote={result["inventory_quote"]:.8f}')
+        self._refresh_trade_stats_from_ledger()
+        snap = self._trade_ledger.snapshot()
+        self.logger.log('INFO', f'[LEDGER] snapshot pnl={snap["realized_pnl"]:.8f} trades={snap["completed_cycles"]} open={snap["open_position_qty"]:.8f}')
 
     def _ledger_fee_rate(self) -> Decimal:
         symbol = str(self.cfg.get('symbol', 'EURIUSDT')).upper()
@@ -649,9 +653,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             return Decimal('0')
         return Decimal(str(self.cfg.get('fee_rate', self._pair_config.taker_fee_rate) or self._pair_config.taker_fee_rate))
 
-    def _refresh_trade_stats_cache(self):
+    def _refresh_trade_stats_from_ledger(self):
         s = self._trade_ledger.snapshot()
         self._trade_stats = {'total': s['total_fills'], 'buy_fills': s['buy_fills'], 'sell_fills': s['sell_fills'], 'cycles': s['completed_cycles'], 'wins': s['winning_cycles'], 'realized_pnl': s['realized_pnl'], 'ticks': s['spread_captured_ticks_total'], 'fees': s['fees'], 'inventory_sells_count': int(s['inventory_sell_qty'] > 0), 'inventory_sells_qty': s['inventory_sell_qty'], 'inventory_sells_quote': s['inventory_sell_quote']}
+        self._mark_ui_dirty()
+
+    def _mark_ui_dirty(self):
+        self._update_runtime_stats_from_ledger()
 
 
     def _update_runtime_stats_from_ledger(self):
