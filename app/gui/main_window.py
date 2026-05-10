@@ -21,6 +21,7 @@ from app.core.logger import AppLogger
 from app.core.market_service import MarketService
 from app.core.order_service import OrderService
 from app.core.polling_manager import PollingManager
+from app.core.pair_profiles import get_pair_config, list_pairs
 from app.core.spread_stability_engine import ReadinessState, SpreadStabilityEngine
 from app.core.runtime_state import RuntimeState
 from app.core.ws_manager import WSManager
@@ -91,6 +92,7 @@ class MainWindow(QMainWindow):
         super().__init__(); self.setWindowTitle('EUT v0.3.9 — Operator Terminal'); self.setMinimumSize(1280,760); self.setStyleSheet(DARK_STYLESHEET); self.setFont(QFont('', APP_FONT_PT))
         self.logger=AppLogger(max_records=500,dedupe_seconds=30); self.cfg=load_config(); self.runtime=RuntimeState(); self.ws=WSManager(enabled=False)
         self._last_market_snapshot={}; self._last_open_orders=[]; self._balances={}; self._status_badges={}; self._orders_by_id={}; self._selected_order_id=None; self._exchange_filters={}
+        self._pair_config = get_pair_config(self.cfg.get('symbol', 'EURIUSDT'))
         self._spread_analyzer=SpreadStabilityAnalyzer(); self._queue_estimator=QueueQualityEstimator(); self._harvest_engine=HarvestReadinessEngine(); self._private_ok=False
         self._spread_engine=SpreadStabilityEngine(Decimal('0.0001'), int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)), stay_ready_ticks=int(self.cfg.get('min_spread_ticks',2)), ready_hysteresis_ms=int(self.cfg.get('ready_drop_debounce_ms',4000)))
         self._spread_metrics=None; self._last_spread_readiness=None
@@ -100,7 +102,7 @@ class MainWindow(QMainWindow):
         self._pending_buy_grace_until=0.0; self._pending_buy_order=None
         self._pending_sell_grace_until=0.0; self._pending_sell_order=None
         self._order_visibility_grace_sec=3.0
-        self._last_reprice_at=0.0; self._reprice_throttle_sec=0.4
+        self._last_reprice_at=0.0; self._reprice_throttle_sec=self._pair_config.top_check_interval_sec
         self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
         self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0; self._cycle_started_at=time.time(); self._last_fill_time='-'
         self._log_throttle_until={}; self._runtime_label_cache={}; self._runtime_label_last_update=0.0
@@ -113,17 +115,18 @@ class MainWindow(QMainWindow):
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
         self._status_timer=QTimer(self); self._status_timer.timeout.connect(self._tick_status); self._status_timer.start(300); QTimer.singleShot(50,self._startup_connect_flow)
     def _init_services(self):
-        self.client=BinanceClient(self.cfg['api_key'],self.cfg['api_secret'],self.cfg['testnet'],self.cfg.get('request_timeout_sec',3)); self.market=MarketService(self.client,self.cfg['symbol']); self.account=AccountService(self.client); self.orders=OrderService(self.client,self.cfg['symbol'])
+        self.client=BinanceClient(self.cfg['api_key'],self.cfg['api_secret'],self.cfg['testnet'],self.cfg.get('request_timeout_sec',3)); self.market=MarketService(self.client,self.cfg['symbol']); self.account=AccountService(self.client, self._pair_config.base_asset, self._pair_config.quote_asset); self.orders=OrderService(self.client,self.cfg['symbol'])
     def _build_ui(self):
         root=QWidget(); self.setCentralWidget(root); main=QVBoxLayout(root); top=QGroupBox('Status Strip'); l=QHBoxLayout(top)
         for k in ['CONNECTED','SPREAD','HARVEST','ORDERS','RISK']:
             b=QLabel(f'{k} -'); self._status_badges[k]=b; l.addWidget(b)
-        self._status_balance_euri=QLabel('EURI - / locked -'); l.addWidget(self._status_balance_euri)
-        self._status_balance_usdt=QLabel('USDT - / locked -'); l.addWidget(self._status_balance_usdt)
+        self._status_balance_euri=QLabel('BASE - / locked -'); l.addWidget(self._status_balance_euri)
+        self._status_balance_usdt=QLabel('QUOTE - / locked -'); l.addWidget(self._status_balance_usdt)
         main.addWidget(top)
         split=QSplitter(Qt.Horizontal)
-        left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
-        for n,w in [('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
+        left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_pair_profile=QLabel('-'); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
+        self.pair_selector = QComboBox(); self.pair_selector.addItems(list_pairs()); self.pair_selector.currentTextChanged.connect(self._on_pair_selected)
+        for n,w in [('PAIR',self.pair_selector),('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Pair profile',self.ts_pair_profile),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         fl.addRow(self._btn('START HARVEST', self.start_harvest)); fl.addRow(self._btn('STOP HARVEST', self.stop_harvest)); fl.addRow(self._btn('Edit Settings', self.open_trade_settings))
         cycle=QGroupBox('Runtime State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
         self.cs_inv_portfolio=QLabel('-'); self.cs_inv_euri_value=QLabel('-'); self.cs_inv_usdt_value=QLabel('-'); self.cs_inv_ratio=QLabel('-'); self.cs_inv_drift=QLabel('-'); self.cs_buy_multiplier=QLabel('1.00x'); self.cs_sell_multiplier=QLabel('1.00x')
@@ -148,6 +151,36 @@ class MainWindow(QMainWindow):
     def open_all_data(self): self.all_data_dialog=AllDataDialog(self,self); self.all_data_dialog.show()
     def apply_settings(self,v): self.cfg.update(v); save_config(self.cfg)
     def apply_trade_settings(self,v): self.cfg.update(v); save_config(self.cfg); self._sync_trade_settings_labels(); self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
+    def _on_pair_selected(self, symbol: str):
+        if not symbol or symbol == self.cfg.get('symbol'):
+            return
+        self._switch_pair(symbol)
+    def _switch_pair(self, symbol: str):
+        prev_symbol = self.cfg.get('symbol', 'EURIUSDT')
+        self.logger.log('INFO', f'[PAIR] switching {prev_symbol} -> {symbol}')
+        self._live_running = False
+        self._cycle = HarvestCycle()
+        self._active_buy_order_id = None; self._active_sell_order_id = None
+        self._pending_buy_order = None; self._pending_sell_order = None
+        self._pending_buy_grace_until = 0.0; self._pending_sell_grace_until = 0.0
+        self._orders_by_id = {}
+        self._last_open_orders = []
+        self._exchange_filters = {}
+        self.cfg['symbol'] = symbol
+        self._pair_config = get_pair_config(symbol)
+        self.cfg['min_stable_ms'] = self._pair_config.default_stable_ms
+        self.cfg['min_spread_ticks'] = self._pair_config.default_spread_ticks
+        self.cfg['reprice_on_move'] = self._pair_config.aggressive_reprice
+        self.market.set_symbol(symbol); self.orders.set_symbol(symbol); self.account.set_assets(self._pair_config.base_asset, self._pair_config.quote_asset)
+        self._reprice_throttle_sec = self._pair_config.top_check_interval_sec
+        self._orders_live_interval_sec = self._pair_config.quote_refresh_interval_sec
+        self.logger.log('INFO', f"[PAIR] profile {self._pair_config.profile}")
+        self._load_exchange_filters()
+        self.logger.log('INFO', f'[FILTERS] reloaded {symbol}')
+        self.refresh_balances(True); self.refresh_orders(True); self.refresh_market(True)
+        self._sync_trade_settings_labels()
+        save_config(self.cfg)
+        self.logger.log('INFO', '[RUNTIME] symbol state reset complete')
     def test_connection(self,v): return True,'ok'
     def refresh_market(self,force=False): self.task_runner.run_task('market', lambda: self.market.snapshot())
     def refresh_balances(self,force=False): self.task_runner.run_task('balances', lambda: self.account.balances(Decimal(str(self._last_market_snapshot.get('last',0) or 0))))
@@ -182,11 +215,11 @@ class MainWindow(QMainWindow):
         self._balances = balances
         self._balance_live_last_refresh = now
         self._private_ok = True
-        euri_delta = abs(Decimal(str(balances.get('EURI_free', 0))) - Decimal(str(prev.get('EURI_free', 0)))) if prev else Decimal('0')
+        euri_delta = abs(Decimal(str(balances.get('BASE_free', 0))) - Decimal(str(prev.get('BASE_free', 0)))) if prev else Decimal('0')
         if euri_delta > Decimal('0.0001'):
-            self.logger.log('INFO', f"[BALANCE] changed reason={reason} EURI_free={balances.get('EURI_free', 0)}")
+            self.logger.log('INFO', f"[BALANCE] changed reason={reason} {self._pair_config.base_asset}_free={balances.get('BASE_free', 0)}")
         else:
-            self._log_throttled('balance_live_refresh', f"[BALANCE] live refresh reason={reason} EURI_free={balances.get('EURI_free', 0)}", 45.0)
+            self._log_throttled('balance_live_refresh', f"[BALANCE] live refresh reason={reason} {self._pair_config.base_asset}_free={balances.get('BASE_free', 0)}", 45.0)
         return balances
 
     def _cleanup_duplicate_side_orders(self) -> bool:
@@ -403,7 +436,7 @@ class MainWindow(QMainWindow):
 
             # BUY engine (independent)
             inv = self._inventory_metrics()
-            available_buy_usdt = Decimal(str(self._balances.get('USDT_free', 0)))
+            available_buy_usdt = Decimal(str(self._balances.get('QUOTE_free', 0)))
             buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10))) * inv['buy_mult']
             min_buy_free = Decimal(str(self.cfg.get('min_buy_free_usdt', 5.0)))
             if net_inv < max_long and available_buy_usdt >= max(min_buy_free, buy_quote):
@@ -478,7 +511,7 @@ class MainWindow(QMainWindow):
                         self._buy_top_state = 'TOP'
 
             # SELL maintain (exchange-balance driven only)
-            exchange_free_euri = Decimal(str(self._balances.get('EURI_free', 0)))
+            exchange_free_euri = Decimal(str(self._balances.get('BASE_free', 0)))
             pending_sell_qty = Decimal('0')
             if c.sell_order_id:
                 so = self._orders_by_id.get(c.sell_order_id, {})
@@ -533,7 +566,7 @@ class MainWindow(QMainWindow):
                     self._pending_sell_grace_until = 0.0
                 self._refresh_balances_live('pre_sell_compute')
                 self._refresh_orders_live('pre_sell_compute')
-                exchange_free_euri = floor_to_step(max(Decimal('0'), Decimal(str(self._balances.get('EURI_free', 0)))), step)
+                exchange_free_euri = floor_to_step(max(Decimal('0'), Decimal(str(self._balances.get('BASE_free', 0)))), step)
                 max_sell_usdt = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10))) * inv['sell_mult']
                 active_sell_remaining_qty = Decimal('0')
                 if c.sell_order_id and c.sell_order_id in open_order_ids:
@@ -656,8 +689,8 @@ class MainWindow(QMainWindow):
         bid = Decimal(str(self._last_market_snapshot.get('bid', 0) or 0))
         ask = Decimal(str(self._last_market_snapshot.get('ask', 0) or 0))
         mid = (bid + ask) / Decimal('2') if bid > 0 and ask > 0 else Decimal(str(self._last_market_snapshot.get('last', 0) or 0))
-        euri_total = Decimal(str(self._balances.get('EURI_free', 0))) + Decimal(str(self._balances.get('EURI_locked', 0)))
-        usdt_total = Decimal(str(self._balances.get('USDT_free', 0))) + Decimal(str(self._balances.get('USDT_locked', 0)))
+        euri_total = Decimal(str(self._balances.get('BASE_free', 0))) + Decimal(str(self._balances.get('BASE_locked', 0)))
+        usdt_total = Decimal(str(self._balances.get('QUOTE_free', 0))) + Decimal(str(self._balances.get('QUOTE_locked', 0)))
         euri_value = euri_total * mid if mid > 0 else Decimal('0')
         portfolio = euri_value + usdt_total
         ratio = (euri_value / portfolio) if portfolio > 0 else Decimal(str(self.cfg.get('target_inventory_ratio', 0.5)))
@@ -683,8 +716,8 @@ class MainWindow(QMainWindow):
         spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
         self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if self._live_running else 'HARVEST IDLE')
         self._status_badges['ORDERS'].setText(f'ORDERS {len(self._last_open_orders)}'); self._status_badges['RISK'].setText(f"RISK {'BLOCKED' if self.cfg.get('risk_guard_enabled') else 'OK'}")
-        self._status_balance_euri.setText(f"EURI {self._fmt_bal('EURI_free')} / locked {self._fmt_bal('EURI_locked')}")
-        self._status_balance_usdt.setText(f"USDT {self._fmt_bal('USDT_free')} / locked {self._fmt_bal('USDT_locked')}")
+        self._status_balance_euri.setText(f"{self._pair_config.base_asset} {self._fmt_bal('BASE_free')} / locked {self._fmt_bal('BASE_locked')}")
+        self._status_balance_usdt.setText(f"{self._pair_config.quote_asset} {self._fmt_bal('QUOTE_free')} / locked {self._fmt_bal('QUOTE_locked')}")
         inv=self._inventory_metrics(); self.cs_inv_portfolio.setText(f"{inv['portfolio']:.2f}"); self.cs_inv_euri_value.setText(f"{inv['euri_value']:.2f}"); self.cs_inv_usdt_value.setText(f"{inv['usdt_value']:.2f}"); self.cs_inv_ratio.setText(f"EURI {inv['ratio']*100:.0f}% / USDT {(Decimal('1')-inv['ratio'])*100:.0f}%"); self.cs_inv_drift.setText(inv['drift']); self.cs_buy_multiplier.setText(f"{inv['buy_mult']:.2f}x"); self.cs_sell_multiplier.setText(f"{inv['sell_mult']:.2f}x")
         sig=(f"{inv['ratio']*100:.0f}",inv['drift'])
         if sig!=self._last_inventory_log_signature:
@@ -722,10 +755,12 @@ class MainWindow(QMainWindow):
             self._selected_order_id = int(order_id) if order_id else None
     def _market_bid(self): return f"{Decimal(str(self._last_market_snapshot.get('bid',0))):.8f}"
     def _market_ask(self): return f"{Decimal(str(self._last_market_snapshot.get('ask',0))):.8f}"
-    def _balance_euri(self): return f"{Decimal(str(self._balances.get('EURI_free',0))):.8f}"
+    def _balance_euri(self): return f"{Decimal(str(self._balances.get('BASE_free',0))):.8f}"
     def _sync_trade_settings_labels(self):
         self.cfg['harvest_mode'] = 'LIVE_TRADE'
-        self.ts_symbol.setText(str(self.cfg.get('symbol','EURIUSDT'))); self.ts_mode.setText('LIVE TRADE'); self.ts_buy_exp.setText(str(self.cfg.get('max_buy_usdt_exposure',10))); self.ts_sell_exp.setText(str(self.cfg.get('max_sell_usdt_exposure',10))); self.ts_min.setText(str(self.cfg.get('min_spread_ticks',2))); self.ts_profit.setText(str(self.cfg.get('target_profit_ticks',1))); self.ts_stable.setText(str(self.cfg.get('min_stable_ms',3000))); self.ts_partial.setText('YES' if self.cfg.get('allow_partial_fills',True) else 'NO'); self.ts_min_partial.setText(str(self.cfg.get('min_partial_fill_euri',0))); self.ts_reprice.setText('YES' if self.cfg.get('reprice_on_move',True) else 'NO'); self.ts_collapse.setText('YES' if self.cfg.get('cancel_on_spread_collapse',True) else 'NO'); self.ts_risk.setText('ON' if self.cfg.get('risk_guard_enabled',False) else 'OFF')
+        self.ts_symbol.setText(str(self.cfg.get('symbol','EURIUSDT'))); self.ts_mode.setText('LIVE TRADE'); self.ts_pair_profile.setText(self._pair_config.profile); self.ts_buy_exp.setText(str(self.cfg.get('max_buy_usdt_exposure',10))); self.ts_sell_exp.setText(str(self.cfg.get('max_sell_usdt_exposure',10))); self.ts_min.setText(str(self.cfg.get('min_spread_ticks',2))); self.ts_profit.setText(str(self.cfg.get('target_profit_ticks',1))); self.ts_stable.setText(str(self.cfg.get('min_stable_ms',3000))); self.ts_partial.setText('YES' if self.cfg.get('allow_partial_fills',True) else 'NO'); self.ts_min_partial.setText(str(self.cfg.get('min_partial_fill_euri',0))); self.ts_reprice.setText('YES' if self.cfg.get('reprice_on_move',True) else 'NO'); self.ts_collapse.setText('YES' if self.cfg.get('cancel_on_spread_collapse',True) else 'NO'); self.ts_risk.setText('ON' if self.cfg.get('risk_guard_enabled',False) else 'OFF')
+        if self.pair_selector.currentText() != self.cfg.get('symbol'):
+            self.pair_selector.blockSignals(True); self.pair_selector.setCurrentText(self.cfg.get('symbol')); self.pair_selector.blockSignals(False)
         self._sync_cycle_state_labels()
 
     def _sync_cycle_state_labels(self):
@@ -787,7 +822,7 @@ class MainWindow(QMainWindow):
     def start_polling(self): self.polling.start(); self.runtime.set_polling(True)
     def _all_data_text(self, group):
         if group == 'Account':
-            return f"EURI_free={self._balances.get('EURI_free', '-')}\nEURI_locked={self._balances.get('EURI_locked', '-')}\nUSDT_free={self._balances.get('USDT_free', '-')}\nUSDT_locked={self._balances.get('USDT_locked', '-')}"
+            return f"{self._pair_config.base_asset}_free={self._balances.get('BASE_free', '-')}\n{self._pair_config.base_asset}_locked={self._balances.get('BASE_locked', '-')}\n{self._pair_config.quote_asset}_free={self._balances.get('QUOTE_free', '-')}\n{self._pair_config.quote_asset}_locked={self._balances.get('QUOTE_locked', '-')}"
         if group == 'Market':
             return f"bid={self._last_market_snapshot.get('bid', '-')}\nask={self._last_market_snapshot.get('ask', '-')}\nlast={self._last_market_snapshot.get('last', '-')}\nspread_readiness={self._spread_metrics.state.readiness.value if self._spread_metrics else '-'}"
         if group == 'Runtime':

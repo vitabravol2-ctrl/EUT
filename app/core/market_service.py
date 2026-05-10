@@ -8,6 +8,9 @@ class MarketService:
     def __init__(self, client, symbol: str) -> None:
         self.client = client
         self.symbol = symbol
+
+    def set_symbol(self, symbol: str) -> None:
+        self.symbol = symbol
         self.last_update = 0.0
         self.tick_size: Decimal | None = None
         self._tick_warned = False
