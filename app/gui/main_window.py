@@ -448,8 +448,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         price = floor_to_tick(bid + (tick * aggr_ticks), tick) if tick > 0 else base_price
         if price >= ask and tick > 0:
             price = floor_to_tick(ask - tick, tick)
-        if price != base_price:
-            self.logger.log('INFO', f'[AGGR] BUY base={base_price} aggr_ticks={aggr_ticks} final={price}')
+        delta_to_bid = int(((price - bid) / tick)) if tick > 0 else 0
+        self.logger.log('INFO', f'[AGGR] BUY bid={bid} ask={ask} ticks={aggr_ticks} final={price} delta_to_bid={delta_to_bid}')
         return price
 
     def _safe_maker_sell_price(self, target_tp_price: Decimal, bid: Decimal, ask: Decimal, tick: Decimal) -> Decimal:
@@ -818,6 +818,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self._cycle.buy_avg_price = Decimal(str(snap.get('avg_open_buy', Decimal('0'))))
         step = Decimal(str(self._exchange_filters.get('stepSize', '0.0001') or '0.0001'))
         sell_qty = floor_to_step(max(Decimal('0'), self._cycle.open_position_qty), step)
+        min_qty = Decimal(str(self._exchange_filters.get('minQty', '0') or '0'))
+        if self._cycle.open_position_qty > min_qty and sell_qty <= 0:
+            self.logger.log('CRITICAL', '[CRITICAL] sell qty zero while position open')
+            sell_qty = floor_to_step(self._cycle.open_position_qty, step)
         self.logger.log('INFO', f'[BUY] qty={qty:.8f} price={price:.8f} spent={event["quote"]:.8f}')
         self.logger.log('INFO', f'[CYCLE] BUY_FILLED qty={qty:.8f} avg={self._cycle.buy_avg_price:.8f} sell_qty={sell_qty:.8f} -> SELL_TARGET')
         self._refresh_trade_stats_from_ledger()
@@ -859,7 +863,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self._closed_event_sell_ids.add(sell_order_id)
             snap = self._trade_ledger.snapshot()
             self.logger.log('INFO', f'[CYCLE] CLOSED pnl={snap.get("last_closed_trade_pnl", Decimal("0")):+.8f} -> FLAT ready_for_next_buy')
-        self.logger.log('INFO', f'[RECON] forced flat from balances reason={reason}')
+        self.logger.log('INFO', f'[RECON] cycle flat finalized reason={reason}')
 
     def _mid_price_for_portfolio(self) -> Decimal:
         bid = Decimal(str(self._last_market_snapshot.get('bid', '0') if self._last_market_snapshot else '0'))
@@ -1211,12 +1215,6 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self._clear_sell_runtime_order()
                 if had_stale:
                     self.logger.log('INFO', '[RECON] FLAT stale ids cleared')
-            base_free = Decimal(str(self._balances.get('BASE_free', 0) or 0))
-            base_locked = Decimal(str(self._balances.get('BASE_locked', 0) or 0))
-            has_live_sell = any(str(o.get('side', '')).upper() == 'SELL' for o in self._last_open_orders)
-            if c.open_position_qty > min_qty_runtime and not c.buy_order_id and not c.sell_order_id and not has_live_sell and base_locked <= min_qty_runtime:
-                self.logger.log('INFO', '[RECON] forced flat from balances')
-                self._finalize_closed_position(None, 'BALANCE_RECON_FLAT')
             if now_mono - self._last_chain_diag_mono >= 3.0:
                 buy_price = Decimal(str(self._orders_by_id.get(int(c.buy_order_id or 0), {}).get('price') or '0'))
                 sell_price = Decimal(str(self._orders_by_id.get(int(c.sell_order_id or 0), {}).get('price') or '0'))
@@ -1257,10 +1255,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             if position_mode == 'FLAT' and c.open_position_qty <= min_qty_runtime and c.buy_order_id and buy_order_live:
                 buy_row = self._orders_by_id.get(int(c.buy_order_id), {})
                 buy_price = Decimal(str(buy_row.get('price') or bid))
-                stale_ticks = max(int(self.cfg.get('entry_aggr_ticks', 0) or 0), int(self.cfg.get('buy_stale_reprice_ticks', 10) or 10))
-                delta_ticks = abs(bid - buy_price) / tick if tick > 0 else Decimal('0')
+                stale_ticks = max(int(self.cfg.get('entry_aggr_ticks', 0) or 0), int(self.cfg.get('buy_stale_reprice_ticks', 25) or 25))
+                delta_ticks = ((bid - buy_price) / tick) if tick > 0 else Decimal('0')
                 buy_age_ms = self._order_age_ms(c.buy_order_id)
-                buy_max_age_ms = int(self.cfg.get('buy_max_age_ms', 8000) or 8000)
+                buy_max_age_ms = int(self.cfg.get('buy_max_age_ms', 5000) or 5000)
                 if (tick > 0 and delta_ticks > Decimal(stale_ticks)) or buy_age_ms > buy_max_age_ms:
                     stale_buy_id = c.buy_order_id
                     try:
@@ -1270,9 +1268,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     self._clear_buy_runtime_order(stale_buy_id)
                     self._buy_repost_next_tick = True
                     if tick > 0 and delta_ticks > Decimal(stale_ticks):
-                        self.logger.log('INFO', f'[BUY] stale far from top cancelled id={stale_buy_id} price={buy_price} best_bid={bid} delta_ticks={int(delta_ticks)}')
+                        self.logger.log('INFO', f'[BUY] stale cancelled far_from_top id={stale_buy_id} price={buy_price} bid={bid} delta_ticks={int(delta_ticks)}')
                     else:
                         self.logger.log('INFO', f'[BUY] stale age repost id={stale_buy_id} age_ms={buy_age_ms}')
+                    self.logger.log('INFO', '[BUY] repost allowed after stale cancel')
                     live_buy_exists = any(str(o.get('side', '')).upper() == 'BUY' for o in self._last_open_orders)
             for order_id, meta in list(self._optimistic_orders.items()):
                 if str(meta.get('side', '')).upper() != 'BUY' or order_id in open_order_ids or self._optimistic_age_ms(order_id) <= 3000:
@@ -1322,13 +1321,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 if exit_only_mode:
                     pass
                 elif not buy_allowed:
-                    block_reason = 'position_open' if position_mode != 'FLAT' else ('live_or_optimistic_buy' if (live_buy_exists or optimistic_buy_active) else ('inventory_limit' if inv['ratio'] > soft_limit else 'exit_only'))
+                    block_reason = 'position_open' if c.open_position_qty > min_qty_runtime else ('live_or_optimistic_buy' if (live_buy_exists or optimistic_buy_active) else ('inventory_limit' if inv['ratio'] > soft_limit else 'exit_only'))
                     if block_reason == 'live_or_optimistic_buy' and position_mode == 'FLAT':
                         near_top = False
                         if c.buy_order_id and c.buy_order_id in open_order_ids:
                             buy_live = self._orders_by_id.get(int(c.buy_order_id), {})
                             buy_live_price = Decimal(str(buy_live.get('price') or bid))
-                            near_ticks = int(self.cfg.get('buy_stale_reprice_ticks', 10) or 10)
+                            near_ticks = int(self.cfg.get('buy_stale_reprice_ticks', 25) or 25)
                             near_top = tick > 0 and abs(bid - buy_live_price) <= (Decimal(near_ticks) * tick)
                         if not near_top:
                             block_reason = 'buy_reprice_pending'
@@ -1569,8 +1568,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self._sell_filled_events_by_qty[qty_key] = self._sell_filled_events_by_qty.get(qty_key, 0) + 1
                         has_live_sell = any(str(o.get('side', '')).upper() == 'SELL' for o in self._last_open_orders)
                         if self._sell_filled_events_by_qty.get(qty_key, 0) >= 2 and c.open_position_qty > min_qty_runtime and not has_live_sell:
-                            self.logger.log('INFO', '[RECON] ghost position detected')
-                            self._finalize_closed_position(c.sell_order_id, 'GHOST_POSITION_KILLER')
+                            self.logger.log('WARNING', '[RECON] ghost position detected; waiting for explicit SELL fill confirmation')
                     # GUI updates are timer-driven only (SELL branch).
                     # GUI updates are timer-driven only (SELL branch).
                     # GUI updates are timer-driven only (SELL branch).
