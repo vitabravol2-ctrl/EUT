@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QCheckBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout
 
 from app.core.settings_validation import validate_settings
 
@@ -30,7 +30,9 @@ class SettingsDialog(QDialog):
         form.addRow('Testnet', self.testnet)
         form.addRow('Только чтение', self.read_only)
         form.addRow('Торговля включена', self.trading_enabled)
-        root.addLayout(form)
+        api_group = QGroupBox('Connection')
+        api_group.setLayout(form)
+        root.addWidget(api_group)
 
         self.status = QLabel('')
         root.addWidget(self.status)
