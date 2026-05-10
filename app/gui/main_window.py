@@ -1181,9 +1181,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     except Exception: pass
                     self._clear_buy_runtime_order(c.buy_order_id)
             if not c.buy_order_id:
-                available_buy_usdt = Decimal(str(self._balances.get('QUOTE_free', 0) or 0))
-                qty = floor_to_step((available_buy_usdt / bid) if bid > 0 else Decimal('0'), step)
+                quote_free = Decimal(str(self._balances.get('QUOTE_free', 0) or 0))
+                max_buy_exposure_usdt = Decimal(str(self.cfg.get('max_buy_exposure_usdt', 0) or 0))
+                buy_budget = min(max_buy_exposure_usdt, quote_free)
+                buy_price = target_buy
+                qty = floor_to_step((buy_budget / buy_price) if buy_price > 0 else Decimal('0'), step)
+                notional = qty * buy_price
+                self.logger.log('INFO', f'[SIZE] CHASER BUY budget={buy_budget} qty={qty} price={buy_price} notional={notional} cap={max_buy_exposure_usdt}')
                 if qty > 0:
+                    assert notional <= max_buy_exposure_usdt, 'two_state_chaser buy notional exceeds max_buy_exposure_usdt'
                     resp = self._place_safe_maker_buy(qty, reason='two_state_chaser')
                     if resp:
                         c.buy_order_id = int(resp.get('orderId'))
