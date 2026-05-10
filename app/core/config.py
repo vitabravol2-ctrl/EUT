@@ -35,6 +35,8 @@ DEFAULT_CONFIG = {
     'inventory_hard_limit': 0.80,
     'min_buy_free_usdt': 5.0,
     'min_sell_free_euri': 1.0,
+    'minimum_reprice_ticks': 5,
+    'minimum_quote_lifetime_ms': 2000,
 }
 
 
