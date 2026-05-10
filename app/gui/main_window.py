@@ -134,12 +134,14 @@ class MainWindow(QMainWindow):
         self._last_market_ts = 0.0
         self._last_market_source = 'NONE'
         self._session_started_at = time.time()
+        self._last_live_tick_log_at = 0.0
         self._trade_lots: list[dict] = []
         self._trade_stats = {'total': 0, 'buy_fills': 0, 'sell_fills': 0, 'cycles': 0, 'wins': 0, 'realized_pnl': Decimal('0'), 'ticks': Decimal('0'), 'fees': Decimal('0'), 'inventory_sells_count': 0, 'inventory_sells_qty': Decimal('0'), 'inventory_sells_quote': Decimal('0')}
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
         self._status_timer=QTimer(self); self._status_timer.timeout.connect(self._tick_status); self._status_timer.start(300); QTimer.singleShot(50,self._startup_connect_flow)
+        self.live_timer = QTimer(self); self.live_timer.timeout.connect(self._live_tick)
 
 
     @property
@@ -227,6 +229,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def closeEvent(self, event):
         self._live_running = False
+        if hasattr(self, 'live_timer') and self.live_timer:
+            self.live_timer.stop()
         if hasattr(self, '_status_timer') and self._status_timer:
             self._status_timer.stop()
         if hasattr(self, 'polling') and self.polling:
@@ -668,6 +672,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             old, new = self._cycle.transition(CycleState.WAIT_READY, 'start requested')
             self.logger.log('FSM', f'{old.value} -> {new.value} reason=transition WAIT_READY')
             self.logger.log('INFO', '[LIVE] runtime started')
+            if hasattr(self, 'live_timer') and self.live_timer:
+                if self.live_timer.isActive():
+                    self.live_timer.stop()
+                self.live_timer.start(500)
             return old, new
         except Exception as e:
             self.logger.log('ERROR', f'[ERROR] start runtime failed: {e}')
@@ -676,6 +684,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def stop_harvest(self):
         try:
             self._live_running = False
+            if hasattr(self, 'live_timer') and self.live_timer and self.live_timer.isActive():
+                self.live_timer.stop()
             self.logger.log('INFO', '[GUI] HARVEST toggle OFF')
             self.logger.log('INFO', '[LIVE] runtime stopped')
             self._runtime_active = False
@@ -702,8 +712,18 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         except Exception as e:
             self.logger.log('ERROR', f'[ERROR] GUI action failed action=HARVEST_OFF error={e}')
 
+    def _live_tick(self):
+        if not self._live_running:
+            return
+        now = time.time()
+        if now - self._last_live_tick_log_at >= 3.0:
+            self.logger.log('INFO', '[LIVE] tick calling run_live_cycle')
+            self._last_live_tick_log_at = now
+        self._run_live_cycle()
+
     def _run_live_cycle(self):
         c = self._cycle
+        self._log_throttled('runtime_cycle_enter', f"[RUNTIME] cycle enter live={self._live_running} private={self._private_ok} data={self._data_mode} fill={self.fo_possible.text() if self.fo_possible else '-'} spread={self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'}", 3.0)
         if not self._live_running:
             self._log_throttled('live_wait_not_running', '[LIVE] waiting reason=harvest off', 7.0)
             return
@@ -722,24 +742,22 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             bid = Decimal(str(self._last_market_snapshot.get('bid', '0')))
             ask = Decimal(str(self._last_market_snapshot.get('ask', '0')))
             if bid <= 0 or ask <= 0 or ask <= bid:
-                self._log_throttled('live_wait_market_stale', '[LIVE] waiting: market stale', 7.0)
+                self._log_throttled('live_wait_market_stale', '[LIVE] waiting reason=market stale', 7.0)
                 return
             filters = self.get_symbol_filters()
             if not filters:
-                self._log_throttled('live_wait_spread_not_ready', '[LIVE] waiting: spread not ready', 7.0)
+                self._log_throttled('live_wait_filters_missing', '[LIVE] waiting reason=filters unavailable', 7.0)
                 return
             tick = Decimal(str(filters.get('tickSize', '0.0001')))
             step = Decimal(str(filters.get('stepSize', '0.0001')))
             min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
             spread_ticks = (ask - bid) / tick if tick > 0 else Decimal('0')
             if spread_ticks < min_spread_ticks:
-                self._log_throttled('live_wait_spread_not_ready', '[LIVE] waiting: spread not ready', 7.0)
+                self._log_throttled('live_wait_spread_not_ready', '[LIVE] waiting reason=spread not ready', 7.0)
                 return
             max_long = Decimal(str(self.cfg.get('max_long_inventory_euri', 500)))
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
             net_inv = c.net_inventory_euri
-            self._log_throttled('runtime_cycle_enter', f"[RUNTIME] cycle enter live={self._live_running} private_ok={self._private_ok} fill={self.fo_possible.text() if self.fo_possible else '-'} spread={self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'} data={self._data_mode}", 3.0)
-
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
 
             buy_grace_active = c.buy_order_id and time.time() < self._pending_buy_grace_until
@@ -1068,9 +1086,6 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         try:
             self._update_status_strip()
             self._update_runtime_stats_panel()
-            if self._live_running:
-                self._log_throttled('live_tick_cycle', '[LIVE] tick live=True calling run_live_cycle', 3.0)
-                self._run_live_cycle()
         except RuntimeError as exc:
             # Qt can fire one last timer tick while widgets are being torn down.
             # Stop the periodic callback to avoid noisy "C++ object already deleted" traces.
