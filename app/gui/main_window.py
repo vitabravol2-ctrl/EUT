@@ -97,7 +97,7 @@ class MainWindow(QMainWindow):
         self._spread_analyzer=SpreadStabilityAnalyzer(); self._queue_estimator=QueueQualityEstimator(); self._harvest_engine=HarvestReadinessEngine(); self._private_ok=False
         self._spread_engine=SpreadStabilityEngine(Decimal('0.0001'), int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)), stay_ready_ticks=int(self.cfg.get('min_spread_ticks',2)), ready_hysteresis_ms=int(self.cfg.get('ready_drop_debounce_ms',4000)))
         self._spread_metrics=None; self._last_spread_readiness=None
-        self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
+        self._fill_observer=self._build_fill_observer()
         self._cycle=HarvestCycle()
         self._active_buy_order_id=None; self._active_sell_order_id=None
         self._pending_buy_grace_until=0.0; self._pending_buy_order=None
@@ -241,7 +241,11 @@ class MainWindow(QMainWindow):
     def open_manual_order(self): self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
     def open_all_data(self): self.all_data_dialog=AllDataDialog(self,self); self.all_data_dialog.show()
     def apply_settings(self,v): self.cfg.update(v); save_config(self.cfg)
-    def apply_trade_settings(self,v): self.cfg.update(v); save_config(self.cfg); self._sync_trade_settings_labels(); self._fill_observer=FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)))
+    def _build_fill_observer(self):
+        fill_window_ms = int(self.cfg.get('fill_window_ms', self.cfg.get('min_stable_ms', 3000)))
+        block_high_activity = bool(self.cfg.get('fill_block_high_activity', False))
+        return FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)), fill_window_ms=fill_window_ms, block_high_activity=block_high_activity)
+    def apply_trade_settings(self,v): self.cfg.update(v); save_config(self.cfg); self._sync_trade_settings_labels(); self._fill_observer=self._build_fill_observer()
     def _on_pair_selected(self, symbol: str):
         if not symbol or symbol == self.cfg.get('symbol'):
             return
@@ -262,10 +266,15 @@ class MainWindow(QMainWindow):
         self.cfg['min_stable_ms'] = self._pair_config.default_stable_ms
         self.cfg['min_spread_ticks'] = self._pair_config.default_spread_ticks
         self.cfg['reprice_on_move'] = self._pair_config.aggressive_reprice
+        if symbol == 'BTCU':
+            self.cfg['min_stable_ms'] = 500
+            self.cfg['fill_window_ms'] = 300
+            self.cfg['fill_block_high_activity'] = False
         self.market.set_symbol(symbol); self.orders.set_symbol(symbol); self.account.set_assets(self._pair_config.base_asset, self._pair_config.quote_asset)
         max_reprice_per_sec = float(self.cfg.get('max_reprice_per_sec', 0) or 0)
         self._reprice_throttle_sec = (1.0 / max_reprice_per_sec) if max_reprice_per_sec > 0 else self._pair_config.top_check_interval_sec
         self._orders_live_interval_sec = self._pair_config.quote_refresh_interval_sec
+        self._fill_observer = self._build_fill_observer()
         self.logger.log('INFO', f"[PAIR] profile {self._pair_config.profile}")
         self._load_exchange_filters()
         self.logger.log('INFO', f'[FILTERS] reloaded {symbol}')
@@ -384,7 +393,10 @@ class MainWindow(QMainWindow):
             self._set_label_text(self.fo_possible, 'YES' if self._fill_observation.fill_possible else 'NO')
             slow_market = self._fill_observation.market_activity == MarketActivity.LOW
             if self._fill_observation.fill_possible != self._last_fill_possible:
-                self.logger.log('INFO', '[FILL] POSSIBLE' if self._fill_observation.fill_possible else '[FILL] NOT_POSSIBLE')
+                if self._fill_observation.fill_possible:
+                    self.logger.log('INFO', '[FILL] POSSIBLE')
+                else:
+                    self.logger.log('INFO', self._fill_not_possible_diag())
                 self._last_fill_possible = self._fill_observation.fill_possible
             if slow_market != self._last_slow_market:
                 self.logger.log('INFO', f"[FILL] slow_market={'YES' if slow_market else 'NO'}")
@@ -517,6 +529,26 @@ class MainWindow(QMainWindow):
             return False, 'fill not possible'
         return True, 'ok'
 
+    def _fill_not_possible_diag(self) -> str:
+        if not self._fill_observation:
+            return '[FILL] not possible reason=no observation'
+        obs = self._fill_observation
+        min_required = max(int(self.cfg.get('min_stable_ms', 3000)), int(self.cfg.get('fill_window_ms', self.cfg.get('min_stable_ms', 3000))))
+        bid = self._last_market_snapshot.get('bid', '0') if self._last_market_snapshot else '0'
+        ask = self._last_market_snapshot.get('ask', '0') if self._last_market_snapshot else '0'
+        spread_ticks = self._spread_metrics.snapshot.spread_ticks if self._spread_metrics else Decimal('0')
+        reasons = []
+        if spread_ticks < Decimal(str(self.cfg.get('min_spread_ticks', 2))):
+            reasons.append('spread below min')
+        if obs.bid_lifetime_ms < int(self.cfg.get('min_stable_ms', 3000)):
+            reasons.append('bid unstable')
+        if obs.ask_lifetime_ms < int(self.cfg.get('min_stable_ms', 3000)):
+            reasons.append('ask unstable')
+        if obs.fill_window_estimate_ms < int(self.cfg.get('fill_window_ms', self.cfg.get('min_stable_ms', 3000))):
+            reasons.append('window too short')
+        reason = ', '.join(reasons) if reasons else 'unknown'
+        return f'[FILL] not possible reason={reason} bid={bid} ask={ask} spread_ticks={spread_ticks:.2f} bid_lifetime_ms={obs.bid_lifetime_ms} ask_lifetime_ms={obs.ask_lifetime_ms} market_activity={obs.market_activity.value} min_required={min_required}'
+
     def start_harvest(self):
         self.logger.log('INFO', '[LIVE] start clicked')
         if not self._private_ok:
@@ -528,10 +560,6 @@ class MainWindow(QMainWindow):
             self._start_live_runtime()
             self.logger.log('FSM', f'{CycleState.ERROR.value} -> {CycleState.RESET.value} reason=start reset')
             self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
-            return
-        ok, reason = self._risk_ok()
-        if not ok:
-            self.logger.log('RISK', f'[RISK] blocked: reason={reason}')
             return
         if not self._live_confirmed:
             answer = QMessageBox.question(self, 'LIVE Confirmation', 'Start LIVE harvest with real Binance orders?\nSmall test mode only.')
