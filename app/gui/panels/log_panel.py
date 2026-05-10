@@ -19,6 +19,7 @@ class LogPanel(QWidget):
         self._collapsed = False
         self._compact_mode = True
         self._visible_limit = min(200, max_lines)
+        self._compact_tags = ('[BUY]', '[SELL]', '[TRADE]', '[PNL]', '[RISK]', '[ERROR]', '[DATA]', '[PAIR]')
         header = QHBoxLayout()
         self.toggle_btn = QPushButton('Hide Logs')
         self.toggle_btn.clicked.connect(self.toggle_collapsed)
@@ -39,6 +40,8 @@ class LogPanel(QWidget):
         self._lines.append(line)
         if not self._collapsed:
             if self._compact_mode:
+                if not str(rec.message).startswith(self._compact_tags):
+                    return
                 self.text.moveCursor(QTextCursor.End)
                 self.text.insertHtml(line + '<br/>')
                 if self.text.document().blockCount() > self._visible_limit:
