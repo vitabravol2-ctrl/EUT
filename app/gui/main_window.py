@@ -811,10 +811,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def _on_buy_fill(self, qty: Decimal, price: Decimal):
         event = self._trade_ledger.record_buy(qty, price, fee=Decimal('0'), timestamp=time.time())
-        self.logger.log('INFO', f'[BUY] qty={qty:.8f} price={price:.8f} spent={event["quote"]:.8f}')
-        self.logger.log('INFO', f'[CYCLE] BUY_FILLED qty={qty:.8f} avg={self._cycle.buy_avg_price:.8f} -> SELL_TARGET')
-        self._refresh_trade_stats_from_ledger()
         snap = self._trade_ledger.snapshot()
+        self._cycle.open_position_qty = Decimal(str(snap.get('open_position_qty', Decimal('0'))))
+        self._cycle.buy_avg_price = Decimal(str(snap.get('avg_open_buy', Decimal('0'))))
+        step = Decimal(str(self._exchange_filters.get('stepSize', '0.0001') or '0.0001'))
+        sell_qty = floor_to_step(max(Decimal('0'), self._cycle.open_position_qty), step)
+        self.logger.log('INFO', f'[BUY] qty={qty:.8f} price={price:.8f} spent={event["quote"]:.8f}')
+        self.logger.log('INFO', f'[CYCLE] BUY_FILLED qty={qty:.8f} avg={self._cycle.buy_avg_price:.8f} sell_qty={sell_qty:.8f} -> SELL_TARGET')
+        self._refresh_trade_stats_from_ledger()
         self.logger.log('INFO', f'[LEDGER] snapshot pnl={snap["realized_pnl"]:.8f} trades={snap["completed_cycles"]} open={snap["open_position_qty"]:.8f}')
 
     def _on_sell_fill(self, qty: Decimal, price: Decimal):
@@ -823,7 +827,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         if result['matched_qty'] > 0:
             self.logger.log('INFO', f'[TRADE] CLOSED event={self._trade_ledger.completed_cycles} qty={result["matched_qty"]:.8f} buy_avg={result["avg_buy"]:.8f} sell={price:.8f} pnl={result["realized"]:+.8f} ticks={result["ticks"]:.2f}')
             self.logger.log('INFO', f'[PNL] realized={result["realized"]:.8f} total={self._trade_ledger.realized_pnl:.8f}')
-        if result['inventory_qty'] > 0:
+        if result['inventory_qty'] > 0 and bool(self.cfg.get('enable_inventory_cleanup', False)):
             self.logger.log('INFO', f'[INV_SELL] qty={result["inventory_qty"]:.8f} quote={result["inventory_quote"]:.8f}')
         self._refresh_trade_stats_from_ledger()
         snap = self._trade_ledger.snapshot()
@@ -1190,8 +1194,17 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
             # BUY engine (independent)
             inv = self._inventory_metrics()
+            ledger_snapshot = self._trade_ledger.snapshot()
+            position_qty = Decimal(str(ledger_snapshot.get('open_position_qty', Decimal('0'))))
+            position_avg = Decimal(str(ledger_snapshot.get('avg_open_buy', Decimal('0'))))
+            if not bool(self.cfg.get('enable_inventory_cleanup', False)):
+                c.open_position_qty = position_qty
+                if position_qty > 0:
+                    c.buy_avg_price = position_avg
             inv_mode, inv_risk, _ = self._inventory_risk_state(inv['ratio'])
             risk_state = inv_risk if inv_risk else 'OK'
+            if (not bool(self.cfg.get('enable_inventory_cleanup', False))) and position_qty <= min_qty_runtime:
+                risk_state = 'OK'
             exit_only_mode = risk_state in ('HEAVY', 'DANGER')
             if exit_only_mode:
                 self._log_throttled('exit_only_mode', f'[EXIT] mode active risk={risk_state}', 7.0)
@@ -1472,7 +1485,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     self._ui_model_set('cs_top_ask_status', 'NO BTC TO SELL')
                     self.logger.log('INFO', '[SELL] disabled no exchange inventory')
                 elif net_inv > max_short and exchange_free_euri >= min_sell_free:
-                    if not c.sell_order_id and c.buy_filled_qty > 0:
+                    if not c.sell_order_id and c.buy_filled_qty > 0 and enable_inventory_cleanup:
                         self.logger.log('INFO', f'[SELL] inventory detected qty={exchange_free_euri}')
                     sell_status = None
                     if c.sell_order_id:
@@ -1501,7 +1514,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                     self._exit_buy_disabled_logged = False
                                     self._sl_pending_started_mono = 0.0
                                     snap = self._trade_ledger.snapshot()
-                                    self.logger.log('INFO', f'[CYCLE] CLOSED pnl={snap.get("last_closed_trade_pnl", Decimal("0")):+.8f} -> FLAT ready')
+                                    self.logger.log('INFO', f'[CYCLE] CLOSED pnl={snap.get("last_closed_trade_pnl", Decimal("0")):+.8f} -> FLAT ready_for_next_buy')
                                 # GUI updates are timer-driven only (SELL branch).
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                                 # GUI updates are timer-driven only (SELL branch).
@@ -1537,7 +1550,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     if c.sell_order_id and c.sell_order_id in open_order_ids:
                         os = self._orders_by_id.get(c.sell_order_id, {})
                         active_sell_remaining_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
-                    sell_capacity_total = floor_to_step(exchange_free_euri + active_sell_remaining_qty, step)
+                    if enable_inventory_cleanup:
+                        sell_capacity_total = floor_to_step(exchange_free_euri + active_sell_remaining_qty, step)
+                    else:
+                        sell_capacity_total = floor_to_step(min(position_qty, exchange_free_euri + active_sell_remaining_qty), step)
                     exposure_target_qty = floor_to_step(max_sell_usdt / ask, step) if ask > 0 else Decimal('0')
                     target_sell_qty = min(floor_to_step(max(Decimal('0'), c.open_position_qty), step), exposure_target_qty) if has_open_position else Decimal('0')
                     capacity_signature = (str(exchange_free_euri), str(active_sell_remaining_qty), str(target_sell_qty))
@@ -1607,7 +1623,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._set_exit_reason('TP_EXIT')
                         sell_cap = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10) or 10))
                         if has_open_position:
-                            sell_qty = floor_to_step(min(c.open_position_qty, exposure_target_qty), step)
+                            base_position_qty = c.open_position_qty if enable_inventory_cleanup else position_qty
+                            sell_qty = floor_to_step(min(base_position_qty, exposure_target_qty), step)
+                            if not enable_inventory_cleanup:
+                                sell_qty = min(sell_qty, floor_to_step(exchange_free_euri + active_sell_remaining_qty, step))
                             mode = 'POSITION'
                         else:
                             sell_qty = min(exchange_free_euri, floor_to_step(sell_cap / ask, step) if ask > 0 else Decimal('0')) if enable_inventory_cleanup else Decimal('0')
@@ -1617,7 +1636,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         if not has_open_position and exchange_free_euri > min_qty_runtime and enable_inventory_cleanup:
                             self.logger.log('INFO', '[INV] cleanup mode')
                         elif not has_open_position and exchange_free_euri > min_qty_runtime and not enable_inventory_cleanup:
-                            self._log_throttled('inventory_cleanup_disabled', f'[INV] cleanup disabled qty={exchange_free_euri:.8f}', 10.0)
+                            self._log_throttled('inventory_cleanup_disabled', f'[INV] ignored old inventory qty={exchange_free_euri:.8f}', 10.0)
+                        if has_open_position and not enable_inventory_cleanup:
+                            if abs(sell_qty - floor_to_step(position_qty, step)) > step:
+                                self.logger.log('ERROR', f'[ERROR] position sell qty mismatch sell_qty={sell_qty:.8f} position_qty={position_qty:.8f} step={step:.8f}')
+                                sell_qty = Decimal('0')
                         if sell_qty < min_qty:
                             self._log_throttled('block_sell_no_qty', '[BLOCK] sell reason=no_qty', 5.0)
                         elif sell_qty > 0:
