@@ -1437,6 +1437,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self.logger.log('RISK', '[RISK] blocked: exchange filters missing')
             return None
         return filters
+    def _current_filters(self) -> tuple[Decimal, Decimal, dict]:
+        filters = self.get_symbol_filters()
+        if not filters:
+            raise RuntimeError('exchange filters unavailable')
+        step = Decimal(str(filters.get('stepSize', '0.0001') or '0.0001'))
+        tick = Decimal(str(filters.get('tickSize', '0.0001') or '0.0001'))
+        return step, tick, filters
+
     def place(self, side, price, qty):
         if not self._private_ok and not self.cfg.get('api_key'): self.logger.log('ERROR','[ORDER] rejected reason=private api unavailable'); return
         try:
