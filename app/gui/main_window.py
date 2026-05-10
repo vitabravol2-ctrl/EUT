@@ -363,6 +363,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self.cfg['min_stable_ms'] = 500
             self.cfg['fill_window_ms'] = 300
             self.cfg['fill_block_high_activity'] = False
+            self.cfg['dynamic_aggression'] = True
+            self.cfg['buy_stale_reprice_ticks'] = int(self.cfg.get('buy_stale_reprice_ticks', 25) or 25)
+            self.cfg['buy_max_age_ms'] = int(self.cfg.get('buy_max_age_ms', 5000) or 5000)
         self.market.set_symbol(symbol); self.orders.set_symbol(symbol); self.account.set_assets(self._pair_config.base_asset, self._pair_config.quote_asset)
         max_reprice_per_sec = float(self.cfg.get('max_reprice_per_sec', 0) or 0)
         self._reprice_throttle_sec = (1.0 / max_reprice_per_sec) if max_reprice_per_sec > 0 else self._pair_config.top_check_interval_sec
@@ -433,19 +436,32 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         ask = Decimal(str(market.get('ask', 0) or 0))
         return bid, ask
 
+    def _dynamic_aggression_enabled(self) -> bool:
+        if 'dynamic_aggression' in self.cfg:
+            return bool(self.cfg.get('dynamic_aggression'))
+        return str(self.cfg.get('symbol', '')).upper() == 'BTCU'
+
+    def _effective_aggr_ticks(self, side: str, spread_ticks: Decimal) -> int:
+        if self._dynamic_aggression_enabled() and str(self.cfg.get('symbol', '')).upper() == 'BTCU':
+            levels = [(300, 0), (600, 80 if side == 'BUY' else 100), (1200, 150 if side == 'BUY' else 200), (None, 300 if side == 'BUY' else 400)]
+            final = 0
+            for limit, ticks in levels:
+                if limit is None or spread_ticks < Decimal(limit):
+                    final = ticks
+                    break
+            self.logger.log('INFO', f'[AGGR] dynamic {side} spread={int(spread_ticks)} ticks={final} final={final}')
+            return final
+        return max(0, int(self.cfg.get('entry_aggr_ticks', 0) if side == 'BUY' else self.cfg.get('exit_aggr_ticks', 0)) or 0)
+
     def _safe_maker_buy_price(self, bid: Decimal, ask: Decimal, tick: Decimal) -> Decimal:
         base_price = floor_to_tick(bid, tick)
-        spread_ticks = Decimal('0')
-        if tick > 0 and ask > bid:
-            spread_ticks = (ask - bid) / tick
-        min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
-        aggr_ticks = 0
-        if spread_ticks >= min_spread_ticks and tick > 0:
-            requested = max(0, int(self.cfg.get('entry_aggr_ticks', 0) or 0))
-            max_pct = max(0.0, float(self.cfg.get('max_aggr_spread_pct', 0.25) or 0.25))
-            max_aggr_ticks = int((spread_ticks * Decimal(str(max_pct))).to_integral_value(rounding='ROUND_FLOOR'))
-            aggr_ticks = min(requested, max_aggr_ticks)
-        price = floor_to_tick(bid + (tick * aggr_ticks), tick) if tick > 0 else base_price
+        spread_ticks = ((ask - bid) / tick) if (tick > 0 and ask > bid) else Decimal('0')
+        aggr_ticks = self._effective_aggr_ticks('BUY', spread_ticks) if tick > 0 else 0
+        raw = bid + (tick * Decimal(aggr_ticks)) if tick > 0 else bid
+        price = min(raw, ask - tick) if tick > 0 else raw
+        if price <= bid:
+            price = base_price
+        price = floor_to_tick(price, tick)
         if price >= ask and tick > 0:
             price = floor_to_tick(ask - tick, tick)
         delta_to_bid = int(((price - bid) / tick)) if tick > 0 else 0
@@ -453,26 +469,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         return price
 
     def _safe_maker_sell_price(self, target_tp_price: Decimal, bid: Decimal, ask: Decimal, tick: Decimal) -> Decimal:
-        base_price = floor_to_tick(max(target_tp_price, ask), tick)
-        spread_ticks = Decimal('0')
-        if tick > 0 and ask > bid:
-            spread_ticks = (ask - bid) / tick
-        min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
-        aggr_ticks = 0
-        if spread_ticks >= min_spread_ticks and tick > 0:
-            requested = max(0, int(self.cfg.get('exit_aggr_ticks', 0) or 0))
-            max_pct = max(0.0, float(self.cfg.get('max_aggr_spread_pct', 0.25) or 0.25))
-            max_aggr_ticks = int((spread_ticks * Decimal(str(max_pct))).to_integral_value(rounding='ROUND_FLOOR'))
-            aggr_ticks = min(requested, max_aggr_ticks)
-        maker_sell_price = ask - (tick * aggr_ticks) if tick > 0 else ask
-        maker_sell_price = max(target_tp_price, maker_sell_price)
-        if maker_sell_price <= bid and tick > 0:
-            maker_sell_price = bid + tick
+        spread_ticks = ((ask - bid) / tick) if (tick > 0 and ask > bid) else Decimal('0')
+        aggr_ticks = self._effective_aggr_ticks('SELL', spread_ticks) if tick > 0 else 0
+        raw = ask - (tick * Decimal(aggr_ticks)) if tick > 0 else ask
+        maker_sell_price = max(target_tp_price, raw, bid + tick if tick > 0 else bid)
         sell_price = floor_to_tick(maker_sell_price, tick)
         if sell_price <= bid and tick > 0:
             sell_price = floor_to_tick(bid + tick, tick)
-        if sell_price != base_price:
-            self.logger.log('INFO', f'[AGGR] SELL base={base_price} aggr_ticks={aggr_ticks} final={sell_price}')
+        self.logger.log('INFO', f'[AGGR] SELL base={target_tp_price} aggr_ticks={aggr_ticks} final={sell_price}')
         return sell_price
 
     def _place_safe_maker_buy(self, qty: Decimal, reason: str = ''):
@@ -1183,9 +1187,6 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             step = Decimal(str(filters.get('stepSize', '0.0001')))
             min_spread_ticks = Decimal(str(self.cfg.get('min_spread_ticks', 2)))
             spread_ticks = self._compute_spread_ticks(bid, ask)
-            if spread_ticks < min_spread_ticks:
-                self._log_throttled('live_wait_spread_not_ready', '[LIVE] waiting reason=spread not ready', 7.0)
-                return
             max_long = Decimal(str(self.cfg.get('max_long_inventory_euri', 500)))
             max_short = Decimal(str(self.cfg.get('max_short_inventory_euri', -500)))
             net_inv = c.net_inventory_euri
@@ -1272,9 +1273,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     if tick > 0 and delta_ticks > Decimal(stale_ticks):
                         self.logger.log('INFO', f'[BUY] stale cancelled far_from_top id={stale_buy_id} price={buy_price} bid={bid} delta_ticks={int(delta_ticks)}')
                     else:
-                        self.logger.log('INFO', f'[BUY] stale age repost id={stale_buy_id} age_ms={buy_age_ms}')
+                        self.logger.log('INFO', f'[BUY] stale cancelled max_age id={stale_buy_id} age_ms={buy_age_ms}')
                     self.logger.log('INFO', '[BUY] repost allowed after stale cancel')
                     live_buy_exists = any(str(o.get('side', '')).upper() == 'BUY' for o in self._last_open_orders)
+            if spread_ticks < min_spread_ticks:
+                self._log_throttled('live_wait_spread_not_ready', '[LIVE] waiting reason=spread not ready', 7.0)
+                return
+
             for order_id, meta in list(self._optimistic_orders.items()):
                 if str(meta.get('side', '')).upper() != 'BUY' or order_id in open_order_ids or self._optimistic_age_ms(order_id) <= 3000:
                     continue
