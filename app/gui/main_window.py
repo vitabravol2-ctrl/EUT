@@ -137,7 +137,8 @@ class MainWindow(QMainWindow):
         self._session_started_at = time.time()
         self._last_live_tick_log_at = 0.0
         self._trade_ledger = TradeLedger()
-        self._trade_stats = self._legacy_trade_stats()
+        self._trade_stats = {}
+        self._refresh_trade_stats_cache()
         self._init_services(); self._build_ui(); self._sync_trade_settings_labels()
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
@@ -534,20 +535,30 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             for c,v in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(v)))
 
     def _on_buy_fill(self, qty: Decimal, price: Decimal):
-        event = self._trade_ledger.on_buy(qty, price, timestamp=time.time())
-        self._trade_stats = self._legacy_trade_stats()
+        event = self._trade_ledger.record_buy(qty, price, fee=Decimal('0'), timestamp=time.time())
+        self._refresh_trade_stats_cache()
         self.logger.log('INFO', f'[LEDGER] BUY qty={qty:.8f} price={price:.8f} quote={event["quote"]:.8f} open_lots={event["open_lots"]}')
 
     def _on_sell_fill(self, qty: Decimal, price: Decimal):
-        taker_fee_rate = Decimal(str(self.cfg.get('fee_rate', self._pair_config.taker_fee_rate) or self._pair_config.taker_fee_rate))
         tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
-        result = self._trade_ledger.on_sell(qty, price, taker_fee_rate, tick, timestamp=time.time())
-        self._trade_stats = self._legacy_trade_stats()
+        result = self._trade_ledger.record_sell(qty, price, fee=self._ledger_fee_rate(), tick_size=tick, timestamp=time.time())
+        self._refresh_trade_stats_cache()
         if result['matched_qty'] > 0:
             self.logger.log('INFO', f'[TRADE] completed qty={result["matched_qty"]:.8f} buy_avg={result["avg_buy"]:.8f} sell={price:.8f} pnl={result["realized"]:.8f} ticks={result["ticks"]:.2f}')
             self.logger.log('INFO', f'[PNL] realized={result["realized"]:.8f} total={self._trade_ledger.realized_pnl:.8f}')
         if result['inventory_qty'] > 0:
             self.logger.log('INFO', f'[INV_SELL] qty={result["inventory_qty"]:.8f} quote={result["inventory_quote"]:.8f}')
+
+    def _ledger_fee_rate(self) -> Decimal:
+        symbol = str(self.cfg.get('symbol', 'EURIUSDT')).upper()
+        if symbol in {'BTCU', 'EURIUSDT'}:
+            return Decimal('0')
+        return Decimal(str(self.cfg.get('fee_rate', self._pair_config.taker_fee_rate) or self._pair_config.taker_fee_rate))
+
+    def _refresh_trade_stats_cache(self):
+        s = self._trade_ledger.snapshot()
+        self._refresh_trade_stats_cache()
+        self._trade_stats = {'total': s['total_fills'], 'buy_fills': s['buy_fills'], 'sell_fills': s['sell_fills'], 'cycles': s['completed_cycles'], 'wins': s['winning_cycles'], 'realized_pnl': s['realized_pnl'], 'ticks': s['spread_captured_ticks_total'], 'fees': s['fees'], 'inventory_sells_count': int(s['inventory_sell_qty'] > 0), 'inventory_sells_qty': s['inventory_sell_qty'], 'inventory_sells_quote': s['inventory_sell_quote']}
 
     def _risk_ok(self) -> tuple[bool, str]:
         if not self.cfg.get('trading_enabled', False):
@@ -973,6 +984,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     elif sell_qty > 0:
                         min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
                         price = floor_to_tick(max(ask, min_exit), tick)
+                        self.logger.log('INFO', '[EXIT] unload mode') if risk in ('HEAVY', 'DANGER') else None
                         self.logger.log('INFO', f'[SELL] TP protected qty={sell_qty} price={price}') if ask < min_exit else None
                         try:
                             resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
@@ -1010,9 +1022,20 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
                     min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
                     if ask < min_exit:
-                        self.logger.log('INFO', '[SELL] TP protected')
-                        self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
-                        pass
+                        sell_age = max(0, time.time() - self._sell_started_at) if c.sell_order_id else 0
+                        relax_after = int(self.cfg.get('inventory_unload_relax_after_sec', 20) or 20)
+                        mode, risk, _ = self._inventory_risk_state(inv['ratio'])
+                        if risk in ('HEAVY', 'DANGER') and sell_age >= relax_after:
+                            if ask >= c.buy_avg_price + tick:
+                                self.logger.log('INFO', '[EXIT] TP relax to breakeven+1')
+                                protected_ask = max(ask, c.buy_avg_price + tick)
+                            else:
+                                self.logger.log('INFO', '[EXIT] TP relax to breakeven')
+                                protected_ask = max(ask, c.buy_avg_price)
+                        else:
+                            self.logger.log('INFO', '[SELL] TP protected')
+                            self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
+                            pass
                     elif available_sell_qty > Decimal('0') and protected_ask != working_price and protected_ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
                         if working_price >= min_exit and protected_ask < working_price:
                             self.logger.log('INFO', '[SELL] TP protected')
@@ -1162,7 +1185,6 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self._last_inventory_log_signature=sig
         enabled=self._private_ok; self.cancel_all_btn.setEnabled(enabled); self.cancel_selected_btn.setEnabled(enabled and self._selected_order_id is not None)
         s = self._trade_ledger.snapshot()
-        self._trade_stats = self._legacy_trade_stats()
         cycles = max(1, s['completed_cycles'])
         avg = (s['realized_pnl'] / Decimal(cycles)) if s['completed_cycles'] > 0 else Decimal('0')
         self.ts_total.setText(str(s['total_fills'])); self.ts_buy_fills.setText(str(s['buy_fills'])); self.ts_sell_fills.setText(str(s['sell_fills'])); self.ts_bought_qty.setText(f"{s['total_buy_qty']:.8f}"); self.ts_bought_quote.setText(f"{s['total_buy_quote']:.8f}"); self.ts_sold_qty.setText(f"{s['total_sell_qty']:.8f}"); self.ts_sold_quote.setText(f"{s['total_sell_quote']:.8f}"); self.ts_matched_sold_qty.setText(f"{s['matched_sell_qty']:.8f}"); self.ts_inventory_qty.setText(f"{s['inventory_sell_qty']:.8f}"); self.ts_inventory_quote.setText(f"{s['inventory_sell_quote']:.8f}"); self.ts_open_position_qty.setText(f"{s['open_position_qty']:.8f}"); self.ts_avg_buy_price.setText(f"{s['avg_buy']:.8f}"); self.ts_avg_sell_price.setText(f"{s['avg_sell']:.8f}"); self.ts_cycles.setText(str(s['completed_cycles'])); self.ts_winrate.setText(f"{s['winrate']:.2f}%"); self.ts_realized.setText(f"{s['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{s['spread_captured_ticks_total']:.2f}"); self.ts_fees.setText(f"{s['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders))); inv=self._inventory_metrics(); mode,risk,_=self._inventory_risk_state(inv['ratio']); self.cs_reason.setText(f"mode={mode} risk={risk} ratio={inv['ratio']*100:.1f}% exit_wait={int(max(0,time.time()-self._sell_started_at)) if self._active_sell_order_id else 0}s")
@@ -1170,9 +1192,6 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(False); self._update_harvest_button()
         self._paint_status()
 
-    def _legacy_trade_stats(self):
-        s = self._trade_ledger.snapshot()
-        return {'total': s['total_fills'], 'buy_fills': s['buy_fills'], 'sell_fills': s['sell_fills'], 'cycles': s['completed_cycles'], 'wins': s['winning_cycles'], 'realized_pnl': s['realized_pnl'], 'ticks': s['spread_captured_ticks_total'], 'fees': s['fees'], 'inventory_sells_count': int(s['inventory_sell_qty'] > 0), 'inventory_sells_qty': s['inventory_sell_qty'], 'inventory_sells_quote': s['inventory_sell_quote']}
     def _set_label_text(self, label: QLabel | None, value: str):
         if label is None or not isValid(label):
             return
@@ -1310,15 +1329,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             pressure=self._pair_config.base_asset if inv['ratio']>Decimal(str(self.cfg.get('target_inventory_ratio',0.5))) else self._pair_config.quote_asset
             ws_age_ms = int((time.time() - self._last_market_ts) * 1000) if self._last_market_ts > 0 else -1
             avg = Decimal('0')
-            cycles = int(self._trade_stats.get('cycles', 0) or 0)
-            realized_pnl = self._trade_stats.get('realized_pnl', Decimal('0'))
-            try:
-                realized_pnl = Decimal(str(realized_pnl))
-            except Exception:
-                realized_pnl = Decimal('0')
+            snap = self._trade_ledger.snapshot()
+            cycles = int(snap.get('completed_cycles', 0) or 0)
+            realized_pnl = Decimal(str(snap.get('realized_pnl', Decimal('0'))))
             if cycles > 0:
                 avg = realized_pnl / Decimal(cycles)
-            return f"pair_profile={self._pair_config.profile}\nbase_asset={self._pair_config.base_asset}\nquote_asset={self._pair_config.quote_asset}\ncycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_quote={inv['portfolio']:.2f}\nbase_value={inv['base_value']:.2f}\nquote_value={inv['quote_value']:.2f}\ninventory_ratio_{self._pair_config.base_asset.lower()}={inv['ratio']*100:.2f}%\ninventory_ratio_{self._pair_config.quote_asset.lower()}={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}\ntrades_total={self._trade_stats['total']}\ncompleted_cycles={self._trade_stats['cycles']}\nrealized_pnl={self._trade_stats['realized_pnl']:.8f}\navg_profit={avg:.8f}\nspread_captured_ticks={self._trade_stats['ticks']:.2f}\nfees={self._trade_stats['fees']:.8f}\ninventory_sells={self._trade_stats['inventory_sells_count']}\nws_connected={self.ws.status.state == 'OK'}\nws_last_tick_age_ms={ws_age_ms}\nws_tick_count={self.ws.status.tick_count}\nws_reconnects={self.ws.status.reconnects}\nlast_ws_error={self.ws.status.last_error}"
+            return f"pair_profile={self._pair_config.profile}\nbase_asset={self._pair_config.base_asset}\nquote_asset={self._pair_config.quote_asset}\ncycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_quote={inv['portfolio']:.2f}\nbase_value={inv['base_value']:.2f}\nquote_value={inv['quote_value']:.2f}\ninventory_ratio_{self._pair_config.base_asset.lower()}={inv['ratio']*100:.2f}%\ninventory_ratio_{self._pair_config.quote_asset.lower()}={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}\ntrades_total={snap['total_fills']}\ncompleted_cycles={snap['completed_cycles']}\nrealized_pnl={snap['realized_pnl']:.8f}\navg_profit={avg:.8f}\nspread_captured_ticks={snap['spread_captured_ticks_total']:.2f}\nfees={snap['fees']:.8f}\ninventory_sells={int(snap['inventory_sell_qty'] > 0)}\nws_connected={self.ws.status.state == 'OK'}\nws_last_tick_age_ms={ws_age_ms}\nws_tick_count={self.ws.status.tick_count}\nws_reconnects={self.ws.status.reconnects}\nlast_ws_error={self.ws.status.last_error}"
         if group == 'Orders':
             return '\n'.join([f"id={o.get('orderId')} side={o.get('side')} price={o.get('price')} qty={o.get('origQty')} exec={o.get('executedQty')} status={o.get('status')}" for o in self._last_open_orders]) or 'No open orders'
         if group == 'Execution':
