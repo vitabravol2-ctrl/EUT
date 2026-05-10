@@ -40,6 +40,9 @@ DEFAULT_CONFIG = {
     'minimum_sell_reprice_ticks': 5,
     'minimum_quote_lifetime_ms': 2000,
     'minimum_sell_quote_lifetime_ms': 2000,
+    'entry_aggr_ticks': 0,
+    'exit_aggr_ticks': 0,
+    'max_aggr_spread_pct': 0.25,
 }
 
 
