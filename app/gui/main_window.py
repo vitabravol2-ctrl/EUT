@@ -1266,7 +1266,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def _set_label_color(self, label: QLabel, color: str):
         if label is None or not isValid(label):
             return
-        label.setStyleSheet(f'color: {color}; font-weight: 600;')
+        try:
+            label.setStyleSheet(f'color: {color}; font-weight: 600;')
+        except RuntimeError:
+            return
     def _paint_status(self):
         self._set_label_color(self._status_badges['CONNECTED'], '#4caf50' if self._private_ok else '#f44336')
         spread_state = self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'
