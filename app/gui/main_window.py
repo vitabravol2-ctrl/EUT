@@ -288,24 +288,24 @@ class MainWindow(QMainWindow):
             self._last_market_snapshot=dict(payload)
             metrics=self._spread_engine.observe(Decimal(str(payload.get('bid',0))), Decimal(str(payload.get('ask',0))), float(payload.get('latency_ms',0)))
             self._spread_metrics=metrics
-            self.ss_ticks.setText(f"raw={metrics.snapshot.spread:.8f} | ticks={metrics.snapshot.spread_ticks:.2f}")
-            self.ss_lifetime.setText(f"{metrics.state.spread_lifetime_ms}ms")
-            self.ss_bid.setText(f"{metrics.state.best_bid_unchanged_ms}ms")
-            self.ss_ask.setText(f"{metrics.state.best_ask_unchanged_ms}ms")
-            self.ss_ratio.setText(f"{metrics.state.stable_spread_ratio*100:.0f}%")
-            self.ss_collapse.setText(str(metrics.state.spread_collapse_count))
-            self.ss_readiness.setText(metrics.state.readiness.value)
+            self._set_label_text(self.ss_ticks, f"raw={metrics.snapshot.spread:.8f} | ticks={metrics.snapshot.spread_ticks:.2f}")
+            self._set_label_text(self.ss_lifetime, f"{metrics.state.spread_lifetime_ms}ms")
+            self._set_label_text(self.ss_bid, f"{metrics.state.best_bid_unchanged_ms}ms")
+            self._set_label_text(self.ss_ask, f"{metrics.state.best_ask_unchanged_ms}ms")
+            self._set_label_text(self.ss_ratio, f"{metrics.state.stable_spread_ratio*100:.0f}%")
+            self._set_label_text(self.ss_collapse, str(metrics.state.spread_collapse_count))
+            self._set_label_text(self.ss_readiness, metrics.state.readiness.value)
             self._fill_observation=self._fill_observer.observe(
                 Decimal(str(payload.get('bid',0))),
                 Decimal(str(payload.get('ask',0))),
                 metrics.snapshot.spread_ticks,
                 metrics.state.spread_lifetime_ms,
             )
-            self.fo_bid.setText(f"{self._fill_observation.bid_lifetime_ms}ms")
-            self.fo_ask.setText(f"{self._fill_observation.ask_lifetime_ms}ms")
-            self.fo_window.setText(f"{self._fill_observation.fill_window_estimate_ms}ms")
-            self.fo_activity.setText(self._fill_observation.market_activity.value)
-            self.fo_possible.setText('YES' if self._fill_observation.fill_possible else 'NO')
+            self._set_label_text(self.fo_bid, f"{self._fill_observation.bid_lifetime_ms}ms")
+            self._set_label_text(self.fo_ask, f"{self._fill_observation.ask_lifetime_ms}ms")
+            self._set_label_text(self.fo_window, f"{self._fill_observation.fill_window_estimate_ms}ms")
+            self._set_label_text(self.fo_activity, self._fill_observation.market_activity.value)
+            self._set_label_text(self.fo_possible, 'YES' if self._fill_observation.fill_possible else 'NO')
             slow_market = self._fill_observation.market_activity == MarketActivity.LOW
             if self._fill_observation.fill_possible != self._last_fill_possible:
                 self.logger.log('INFO', '[FILL] POSSIBLE' if self._fill_observation.fill_possible else '[FILL] NOT_POSSIBLE')
@@ -839,6 +839,11 @@ class MainWindow(QMainWindow):
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(True)
         self._paint_status()
         self._run_live_cycle()
+    def _set_label_text(self, label: QLabel | None, value: str):
+        if label is None or not isValid(label):
+            return
+        label.setText(value)
+
     def _set_label_color(self, label: QLabel, color: str):
         if label is None or not isValid(label):
             return
@@ -854,7 +859,8 @@ class MainWindow(QMainWindow):
         cycle_color = {'IDLE': '#9e9e9e', 'WAIT_READY': '#fbc02d', 'PLACE_BUY': '#42a5f5', 'BUY_WORKING': '#42a5f5', 'CANCEL_BUY': '#ff9800', 'BUY_FILLED': '#4caf50', 'PLACE_SELL': '#42a5f5', 'SELL_WORKING': '#42a5f5', 'CANCEL_SELL': '#ff9800', 'SELL_FILLED': '#4caf50', 'PROFIT_LOCKED': '#4caf50', 'EXIT_PENDING': '#ff9800', 'ERROR': '#f44336', 'STOPPED': '#9e9e9e'}.get(self._cycle.state.value, '#e6edf3')
         self._set_label_color(self.cs_state, cycle_color)
         self._set_label_color(self.ss_readiness, '#4caf50' if spread_state == 'READY' else ('#fbc02d' if spread_state == 'WATCH' else '#9e9e9e'))
-        self._set_label_color(self.fo_possible, '#4caf50' if self.fo_possible.text() == 'YES' else '#9e9e9e')
+        fill_possible_text = self.fo_possible.text() if self.fo_possible is not None and isValid(self.fo_possible) else 'NO'
+        self._set_label_color(self.fo_possible, '#4caf50' if fill_possible_text == 'YES' else '#9e9e9e')
         inv=self._inventory_metrics(); self._set_label_color(self.cs_inv_drift, inv['color'])
     def _fmt_bal(self,k):
         if not self._private_ok and not self._balances: return '-'
