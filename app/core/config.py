@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     'harvest_mode': 'MANUAL',
     'max_buy_usdt_exposure': 10.0,
     'max_sell_usdt_exposure': 10.0,
+    'enable_inventory_cleanup': False,
     'min_spread_ticks': 2,
     'target_profit_ticks': 1,
     'min_stable_ms': 3000,
