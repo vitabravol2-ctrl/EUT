@@ -24,7 +24,10 @@ class PairConfig:
     rest_validate_sec: int
     max_ws_rest_drift_ticks: int
     minimum_reprice_ticks: int
+    minimum_buy_reprice_ticks: int
+    minimum_sell_reprice_ticks: int
     minimum_quote_lifetime_ms: int
+    minimum_sell_quote_lifetime_ms: int
     max_reprice_per_sec: int
 
 
@@ -46,7 +49,10 @@ PAIR_REGISTRY: dict[str, PairConfig] = {
         rest_validate_sec=10,
         max_ws_rest_drift_ticks=2,
         minimum_reprice_ticks=1,
+        minimum_buy_reprice_ticks=1,
+        minimum_sell_reprice_ticks=1,
         minimum_quote_lifetime_ms=3000,
+        minimum_sell_quote_lifetime_ms=3000,
         max_reprice_per_sec=1,
     ),
     'BTCU': PairConfig(
@@ -66,7 +72,10 @@ PAIR_REGISTRY: dict[str, PairConfig] = {
         rest_validate_sec=3,
         max_ws_rest_drift_ticks=3,
         minimum_reprice_ticks=5,
+        minimum_buy_reprice_ticks=25,
+        minimum_sell_reprice_ticks=20,
         minimum_quote_lifetime_ms=2000,
+        minimum_sell_quote_lifetime_ms=4000,
         max_reprice_per_sec=2,
     ),
 }
@@ -109,7 +118,10 @@ def get_pair_config(symbol: str) -> PairConfig:
         rest_validate_sec=default.rest_validate_sec,
         max_ws_rest_drift_ticks=default.max_ws_rest_drift_ticks,
         minimum_reprice_ticks=default.minimum_reprice_ticks,
+        minimum_buy_reprice_ticks=default.minimum_buy_reprice_ticks,
+        minimum_sell_reprice_ticks=default.minimum_sell_reprice_ticks,
         minimum_quote_lifetime_ms=default.minimum_quote_lifetime_ms,
+        minimum_sell_quote_lifetime_ms=default.minimum_sell_quote_lifetime_ms,
         max_reprice_per_sec=default.max_reprice_per_sec,
     )
 

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 class WSStatus:
     state: str = 'OFF'  # OFF | CONNECTING | OK | ERROR
     last_error: str = ''
+    tick_count: int = 0
+    reconnects: int = 0
 
 
 class WSManager:
@@ -20,11 +22,14 @@ class WSManager:
         if not self.enabled:
             self.status.state = 'OFF'
             return
+        if self.status.state in ('ERROR', 'OK'):
+            self.status.reconnects += 1
         self.status.state = 'CONNECTING'
 
     def mark_ok(self) -> None:
         if self.enabled:
             self.status.state = 'OK'
+            self.status.tick_count += 1
 
     def mark_error(self, error: str) -> None:
         self.status.state = 'ERROR'
