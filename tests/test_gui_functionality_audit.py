@@ -31,7 +31,7 @@ def test_start_click_logs_gui_and_live(window, monkeypatch):
     monkeypatch.setattr(window.logger, 'log', lambda lvl, msg: logs.append(msg))
     window.start_harvest()
     assert '[GUI] START clicked' in logs
-    assert '[LIVE] start clicked' in logs
+    assert any(msg.startswith('[GUI] confirmation result=') for msg in logs)
     assert '[GUI] confirmation yes' in logs
     assert '[LIVE] runtime started' in logs
 
@@ -69,3 +69,48 @@ def test_theme_has_button_states(window):
     assert 'QPushButton:hover' in ss
     assert 'QPushButton:pressed' in ss
     assert 'QPushButton:disabled' in ss
+
+
+def test_start_confirmation_yes_calls_start_runtime(window, monkeypatch):
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a, **k: QMessageBox.Yes)
+    window._private_ok = True
+    calls = []
+    monkeypatch.setattr(window, '_start_live_runtime', lambda: calls.append('start'))
+    window.start_harvest()
+    assert calls == ['start']
+
+
+def test_start_confirmation_no_logs_no(window, monkeypatch):
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a, **k: QMessageBox.No)
+    window._private_ok = True
+    logs = []
+    monkeypatch.setattr(window.logger, 'log', lambda lvl, msg: logs.append(msg))
+    window.start_harvest()
+    assert '[GUI] confirmation no' in logs
+
+
+def test_all_data_button_calls_handler(window, monkeypatch):
+    calls = []
+    monkeypatch.setattr(window, 'show_all_data', lambda: calls.append('all_data'))
+    window.all_data_button.clicked.emit()
+    assert calls == ['all_data']
+
+
+def test_all_gui_actions_have_direct_refs(window):
+    assert window.start_button is not None
+    assert window.stop_button is not None
+    assert window.manual_order_button is not None
+    assert window.cancel_selected_button is not None
+    assert window.cancel_all_button is not None
+    assert window.all_data_button is not None
+    assert window.settings_button is not None
+    assert window.edit_settings_button is not None
+
+
+def test_gui_action_exceptions_are_logged(window, monkeypatch):
+    logs = []
+    monkeypatch.setattr(window.logger, 'log', lambda lvl, msg: logs.append(msg))
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom')))
+    window._private_ok = True
+    window.start_harvest()
+    assert any('[ERROR] GUI action failed action=START' in msg for msg in logs)
