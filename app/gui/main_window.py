@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self._pending_buy_grace_until=0.0; self._pending_buy_order=None
         self._pending_sell_grace_until=0.0; self._pending_sell_order=None
         self._order_visibility_grace_sec=3.0
+        self._optimistic_orders: dict[int, dict[str, float | str]] = {}
         self._last_reprice_at=0.0
         max_reprice_per_sec = float(self.cfg.get('max_reprice_per_sec', 0) or 0)
         self._reprice_throttle_sec=(1.0 / max_reprice_per_sec) if max_reprice_per_sec > 0 else self._pair_config.top_check_interval_sec
@@ -551,6 +552,21 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self._active_sell_order_id = keep_id
         if changed:
             self._refresh_orders_live('duplicate_cleanup', force=True)
+            live_by_side = {'BUY': [], 'SELL': []}
+            for order in self._last_open_orders:
+                side = str(order.get('side', '')).upper()
+                if side in live_by_side and order.get('orderId'):
+                    live_by_side[side].append(int(order.get('orderId')))
+            if live_by_side['BUY']:
+                self._cycle.buy_order_id = live_by_side['BUY'][0]
+                self._active_buy_order_id = live_by_side['BUY'][0]
+            else:
+                self._clear_buy_runtime_order()
+            if live_by_side['SELL']:
+                self._cycle.sell_order_id = live_by_side['SELL'][0]
+                self._active_sell_order_id = live_by_side['SELL'][0]
+            else:
+                self._clear_sell_runtime_order()
         return changed
 
     def _on_task_success(self,name,payload):
@@ -648,6 +664,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         stale = stale_id if stale_id is not None else self._cycle.buy_order_id
         if stale is not None:
             self._quote_birth.pop(stale, None)
+            self._optimistic_orders.pop(stale, None)
         self._cycle.buy_order_id = None
         self._active_buy_order_id = None
         self._pending_buy_order = None
@@ -657,6 +674,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         stale = stale_id if stale_id is not None else self._cycle.sell_order_id
         if stale is not None:
             self._quote_birth.pop(stale, None)
+            self._optimistic_orders.pop(stale, None)
         self._cycle.sell_order_id = None
         self._active_sell_order_id = None
         self._pending_sell_order = None
@@ -666,12 +684,24 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         c = self._cycle
         buy_id = c.buy_order_id
         sell_id = c.sell_order_id
-        if buy_id and buy_id not in live_order_ids:
-            self._clear_buy_runtime_order(buy_id)
-            self.logger.log('INFO', f'[RECON] cleared stale BUY id={buy_id}')
-        if sell_id and sell_id not in live_order_ids:
-            self._clear_sell_runtime_order(sell_id)
-            self.logger.log('INFO', f'[RECON] cleared stale SELL id={sell_id}')
+        if buy_id and buy_id not in live_order_ids and self._is_optimistic_grace_active(buy_id):
+            self.logger.log('INFO', f'[RECON] keep optimistic BUY id={buy_id} age={self._optimistic_age_ms(buy_id)}ms')
+        if sell_id and sell_id not in live_order_ids and self._is_optimistic_grace_active(sell_id):
+            self.logger.log('INFO', f'[RECON] keep optimistic SELL id={sell_id} age={self._optimistic_age_ms(sell_id)}ms')
+
+    def _remember_optimistic_order(self, order_id: int, side: str):
+        self._optimistic_orders[int(order_id)] = {'side': str(side).upper(), 'created_ts': time.time()}
+
+    def _optimistic_age_ms(self, order_id: int) -> int:
+        entry = self._optimistic_orders.get(int(order_id))
+        if not entry:
+            return 0
+        return max(0, int((time.time() - float(entry.get('created_ts', 0.0))) * 1000))
+
+    def _is_optimistic_grace_active(self, order_id: int | None) -> bool:
+        if not order_id:
+            return False
+        return self._optimistic_age_ms(order_id) < int(self._order_visibility_grace_sec * 1000)
     def has_active_buy(self) -> bool: return self._active_buy_order_id is not None
     def has_active_sell(self) -> bool: return self._active_sell_order_id is not None
 
@@ -1042,8 +1072,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10))) * inv['buy_mult']
             min_buy_free = Decimal(str(self.cfg.get('min_buy_free_usdt', 5.0)))
             soft_limit = Decimal(str(self.cfg.get('inventory_soft_limit', 0.65)))
+            live_buy_exists = any(str(o.get('side', '')).upper() == 'BUY' for o in self._last_open_orders)
+            optimistic_buy_active = any(
+                str(v.get('side', '')).upper() == 'BUY' and self._is_optimistic_grace_active(order_id)
+                for order_id, v in self._optimistic_orders.items()
+            )
             buy_order_live = bool(c.buy_order_id and c.buy_order_id in open_order_ids)
-            buy_allowed = (position_mode == 'FLAT') and (not exit_only_mode) and inv['ratio'] <= soft_limit and (not buy_order_live) and c.open_position_qty <= min_qty_runtime
+            buy_allowed = (position_mode == 'FLAT') and (not exit_only_mode) and inv['ratio'] <= soft_limit and (not live_buy_exists) and (not optimistic_buy_active) and c.open_position_qty <= min_qty_runtime
             if exit_only_mode and c.buy_order_id:
                 try:
                     self.orders.cancel(c.buy_order_id)
@@ -1065,7 +1100,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 if exit_only_mode:
                     pass
                 elif not buy_allowed:
-                    block_reason = 'position_open' if position_mode != 'FLAT' else ('buy_order_active' if buy_order_live else ('inventory_limit' if inv['ratio'] > soft_limit else 'exit_only'))
+                    block_reason = 'position_open' if position_mode != 'FLAT' else ('live_or_optimistic_buy' if (live_buy_exists or optimistic_buy_active) else ('inventory_limit' if inv['ratio'] > soft_limit else 'exit_only'))
                     self._log_throttled('block_buy_'+block_reason, f'[BLOCK] buy reason={block_reason}', 5.0)
                 buy_status = None
                 if buy_allowed:
@@ -1111,10 +1146,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 elif buy_allowed and c.buy_order_id and c.buy_order_id not in open_order_ids:
                     self.logger.log('INFO', '[BUY] lost, reconciling')
                 if buy_allowed and should_clear_active_order(c.buy_order_id, buy_status, open_order_ids) and not buy_grace_active:
-                    c.buy_order_id = None
-                    self._active_buy_order_id = None
-                    self._pending_buy_order = None
-                    self._pending_buy_grace_until = 0.0
+                    self.logger.log('INFO', f'[RECON] cleared stale BUY id={c.buy_order_id} status={buy_status or "UNKNOWN_ORDER"}')
+                    self._clear_buy_runtime_order(c.buy_order_id)
                 if buy_allowed and not c.buy_order_id and not buy_grace_active and not self._pending_buy_order:
                     qty_n = floor_to_step(buy_quote / bid, step) if bid > 0 else Decimal('0')
                     if qty_n > 0:
@@ -1127,6 +1160,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self._active_buy_order_id = c.buy_order_id
                         self._pending_buy_order = c.buy_order_id
                         self._pending_buy_grace_until = time.time() + self._order_visibility_grace_sec
+                        self._remember_optimistic_order(c.buy_order_id, 'BUY')
                         self._buy_started_at = time.time()
                         self._quote_birth[c.buy_order_id] = time.time()
                         self._ui_model_set('cs_top_bid_status', 'WORKING')
@@ -1255,10 +1289,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self.logger.log('INFO', '[RUNTIME] registry cleaned')
                         self.logger.log('INFO', '[RUNTIME] optimistic cleared')
                     if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids) and not sell_grace_active:
-                        c.sell_order_id = None
-                        self._active_sell_order_id = None
-                        self._pending_sell_order = None
-                        self._pending_sell_grace_until = 0.0
+                        self.logger.log('INFO', f'[RECON] cleared stale SELL id={c.sell_order_id} status={sell_status or "UNKNOWN_ORDER"}')
+                        self._clear_sell_runtime_order(c.sell_order_id)
                     # GUI updates are timer-driven only (SELL branch).
                     # GUI updates are timer-driven only (SELL branch).
                     # GUI updates are timer-driven only (SELL branch).
@@ -1378,6 +1410,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._active_sell_order_id = c.sell_order_id
                             self._pending_sell_order = c.sell_order_id
                             self._pending_sell_grace_until = time.time() + self._order_visibility_grace_sec
+                            self._remember_optimistic_order(c.sell_order_id, 'SELL')
                             self._sell_started_at = time.time()
                             self._quote_birth[c.sell_order_id] = time.time()
                             self._ui_model_set('cs_top_ask_status', 'WORKING')
