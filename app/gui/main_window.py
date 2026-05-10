@@ -196,9 +196,9 @@ class MainWindow(QMainWindow):
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
     def _startup_connect_flow(self):
         self._load_exchange_filters()
+        self.refresh_market(True)
         self.refresh_balances(True)
         self.refresh_orders(True)
-        self.refresh_market(True)
         self.start_polling()
         self.logger.log('INFO', '[WS] connecting')
         self.ws.connect()
@@ -1044,7 +1044,10 @@ class MainWindow(QMainWindow):
     def cancel_all(self):
         try: self.orders.cancel_all(); self.logger.log('INFO','cancel all requested'); self.refresh_orders(True)
         except Exception as e: self.logger.log('ERROR',f'cancel all failed: {e}')
-    def start_polling(self): self.polling.start(); self.runtime.set_polling(True)
+    def start_polling(self):
+        self.polling.set_private_enabled(True)
+        self.polling.start()
+        self.runtime.set_polling(True)
     def _all_data_text(self, group):
         if group == 'Account':
             return f"{self._pair_config.base_asset}_free={self._balances.get('BASE_free', '-')}\n{self._pair_config.base_asset}_locked={self._balances.get('BASE_locked', '-')}\n{self._pair_config.quote_asset}_free={self._balances.get('QUOTE_free', '-')}\n{self._pair_config.quote_asset}_locked={self._balances.get('QUOTE_locked', '-')}"
