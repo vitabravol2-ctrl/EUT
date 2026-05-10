@@ -31,6 +31,8 @@ from app.gui.panels.log_panel import LogPanel
 from app.gui.settings_dialog import SettingsDialog
 from app.gui.ui_constants import *
 
+DEBUG_FORCE_START = False
+
 DARK_STYLESHEET = """
 QWidget { background: #0b0f14; color: #e6edf3; }
 QPushButton {
@@ -622,10 +624,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         try:
             self.logger.log('INFO', '[GUI] START clicked')
             self.logger.log('INFO', f'[GUI] private_ok={self._private_ok} live={self._live_running}')
-            if not self._private_ok and not DEBUG_FORCE_START:
+            debug_force = bool(globals().get("DEBUG_FORCE_START", False))
+            if not self._private_ok and not debug_force:
                 self.logger.log('RISK', '[RISK] blocked: not connected')
                 return
-            if DEBUG_FORCE_START:
+            if debug_force:
                 self.logger.log('INFO', '[GUI] DEBUG_FORCE_START direct runtime call')
             self._start_live_runtime()
         except Exception as e:
@@ -1215,6 +1218,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             inv=self._inventory_metrics()
             pressure=self._pair_config.base_asset if inv['ratio']>Decimal(str(self.cfg.get('target_inventory_ratio',0.5))) else self._pair_config.quote_asset
             ws_age_ms = int((time.time() - self._last_market_ts) * 1000) if self._last_market_ts > 0 else -1
+            avg = Decimal('0')
+            cycles = int(self._trade_stats.get('cycles', 0) or 0)
+            realized_pnl = self._trade_stats.get('realized_pnl', Decimal('0'))
+            try:
+                realized_pnl = Decimal(str(realized_pnl))
+            except Exception:
+                realized_pnl = Decimal('0')
+            if cycles > 0:
+                avg = realized_pnl / Decimal(cycles)
             return f"pair_profile={self._pair_config.profile}\nbase_asset={self._pair_config.base_asset}\nquote_asset={self._pair_config.quote_asset}\ncycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_quote={inv['portfolio']:.2f}\nbase_value={inv['base_value']:.2f}\nquote_value={inv['quote_value']:.2f}\ninventory_ratio_{self._pair_config.base_asset.lower()}={inv['ratio']*100:.2f}%\ninventory_ratio_{self._pair_config.quote_asset.lower()}={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}\ntrades_total={self._trade_stats['total']}\ncompleted_cycles={self._trade_stats['cycles']}\nrealized_pnl={self._trade_stats['realized_pnl']:.8f}\navg_profit={avg:.8f}\nspread_captured_ticks={self._trade_stats['ticks']:.2f}\nfees={self._trade_stats['fees']:.8f}\ninventory_sells={self._trade_stats['inventory_sells_count']}\nws_connected={self.ws.status.state == 'OK'}\nws_last_tick_age_ms={ws_age_ms}\nws_tick_count={self.ws.status.tick_count}\nws_reconnects={self.ws.status.reconnects}\nlast_ws_error={self.ws.status.last_error}"
         if group == 'Orders':
             return '\n'.join([f"id={o.get('orderId')} side={o.get('side')} price={o.get('price')} qty={o.get('origQty')} exec={o.get('executedQty')} status={o.get('status')}" for o in self._last_open_orders]) or 'No open orders'
