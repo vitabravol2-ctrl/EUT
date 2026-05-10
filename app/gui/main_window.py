@@ -463,7 +463,8 @@ class MainWindow(QMainWindow):
             return False, 'trading not connected'
         if not self._balances:
             return False, 'balances not loaded'
-        if self.cfg.get('risk_guard_enabled', False):
+        risk_blocked = bool(self._balances.get('risk_blocked', False))
+        if self.cfg.get('risk_guard_enabled', False) and risk_blocked:
             return False, 'risk guard blocked'
         if not self._spread_metrics:
             return False, 'spread not ready'
@@ -920,7 +921,10 @@ class MainWindow(QMainWindow):
             self._last_data_mode = self._data_mode
         live_loop = self._live_running
         self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if live_loop else 'HARVEST IDLE')
-        self._status_badges['ORDERS'].setText(f'ORDERS {len(self._last_open_orders)}'); self._status_badges['RISK'].setText(f"RISK {'BLOCKED' if self.cfg.get('risk_guard_enabled') else 'OK'}")
+        risk_blocked = bool(self._balances.get('risk_blocked', False))
+        risk_enabled = bool(self.cfg.get('risk_guard_enabled'))
+        risk_label = 'BLOCKED' if (risk_enabled and risk_blocked) else ('ON' if risk_enabled else 'OK')
+        self._status_badges['ORDERS'].setText(f'ORDERS {len(self._last_open_orders)}'); self._status_badges['RISK'].setText(f'RISK {risk_label}')
         self._status_balance_euri.setText(f"{self._pair_config.base_asset} {self._fmt_bal('BASE_free')} / locked {self._fmt_bal('BASE_locked')}")
         self._status_balance_usdt.setText(f"{self._pair_config.quote_asset} {self._fmt_bal('QUOTE_free')} / locked {self._fmt_bal('QUOTE_locked')}")
 
