@@ -1656,7 +1656,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                     self._pending_sell_order = None
                                     self._pending_sell_grace_until = 0.0
                                     self.logger.log('INFO', f'[EXIT] emergency MARKET SELL qty={sell_qty:.8f}')
-                                    continue
+                                    return
                                 sell_age = max(0, time.time() - self._sell_started_at) if self._sell_started_at else 0
                                 emergency_loss_ticks = Decimal(str(self.cfg.get('emergency_loss_ticks', 50) or 50))
                                 emergency_floor = c.buy_avg_price - (emergency_loss_ticks * tick)
