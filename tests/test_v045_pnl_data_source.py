@@ -56,3 +56,12 @@ def test_rest_fresh_status_and_not_stale(qapp):
     w.cfg['market_stale_ms'] = 3000
     w._tick_status()
     assert w._status_badges['DATA'].text() == 'DATA REST OK'
+
+
+def test_partial_sell_split_matched_and_inventory(qapp):
+    w = _window()
+    w._on_buy_fill(Decimal('0.003'), Decimal('80000'))
+    w._on_sell_fill(Decimal('0.012'), Decimal('81000'))
+    assert w._trade_stats['cycles'] == 1
+    assert w._trade_stats['inventory_sells_count'] == 1
+    assert w._trade_stats['inventory_sells_qty'] == Decimal('0.009')
