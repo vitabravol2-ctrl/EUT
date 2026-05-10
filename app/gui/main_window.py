@@ -221,7 +221,7 @@ QPushButton#btn_info:hover { background: #2a71d5; }
 QPushButton#btn_info:pressed { background: #184f9a; }
 """)
         split.addWidget(left); split.addWidget(center); split.addWidget(cycle); split.addWidget(right); split.setStretchFactor(1, 3); main.addWidget(split)
-        logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
+        logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(1000); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
         self.logger.log('INFO', '[GUI] action wired HARVEST_TOGGLE')
         self.logger.log('INFO', '[GUI] action wired MANUAL')
         self.logger.log('INFO', '[GUI] action wired CANCEL_SELECTED')
@@ -453,7 +453,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
             spread_raw = ask - bid if ask > bid else Decimal('0')
             spread_ticks = self._compute_spread_ticks(bid, ask)
-            self.logger.log('INFO', f"[MARKET] symbol={self.cfg.get('symbol','EURIUSDT')} bid={bid} ask={ask} tickSize={tick} spread_raw={spread_raw} spread_ticks={spread_ticks}")
+            self._log_throttled('market_snapshot', f"[MARKET] symbol={self.cfg.get('symbol','EURIUSDT')} bid={bid} ask={ask} tickSize={tick} spread_raw={spread_raw} spread_ticks={spread_ticks}", 5.0)
             self._set_label_text(self.ss_ticks, f"raw={metrics.snapshot.spread:.8f} | ticks={int(spread_ticks)}")
             self._set_label_text(self.ss_lifetime, f"{metrics.state.spread_lifetime_ms}ms")
             self._set_label_text(self.ss_bid, f"{metrics.state.best_bid_unchanged_ms}ms")
@@ -707,7 +707,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self.logger.log('INFO', '[RUNTIME] cycle enter')
         c = self._cycle
         fill_state = self._safe_label_text(self.fo_possible, '-')
-        self._log_throttled('runtime_cycle_enter', f"[RUNTIME] cycle enter live={self._live_running} private={self._private_ok} data={self._data_mode} fill={fill_state} spread={self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'}", 3.0)
+        self._log_throttled('runtime_cycle_enter', f"[RUNTIME] cycle enter live={self._live_running} private={self._private_ok} data={self._data_mode} fill={fill_state} spread={self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'}", 10.0)
         if not self._live_running:
             self._log_throttled('live_wait_not_running', '[LIVE] waiting reason=harvest off', 7.0)
             return
