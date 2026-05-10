@@ -135,6 +135,7 @@ class MainWindow(QMainWindow):
         self._orders_gui_last_sync=0.0; self._orders_gui_interval_sec=1.0
         self._sell_capacity_signature=None; self._buy_top_state='UNKNOWN'; self._sell_top_state='UNKNOWN'; self._exit_buy_disabled_logged=False
         self._quote_birth: dict[int, float] = {}
+        self._buy_repost_next_tick = False
         self._data_mode = 'REST'
         self._last_data_mode = None
         self._last_market_ts = 0.0
@@ -1100,6 +1101,51 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 for order_id, v in self._optimistic_orders.items()
             )
             buy_order_live = bool(c.buy_order_id and c.buy_order_id in open_order_ids)
+            if self._buy_repost_next_tick and position_mode == 'FLAT':
+                self._buy_repost_next_tick = False
+            if position_mode == 'FLAT' and c.open_position_qty <= min_qty_runtime and c.buy_order_id and buy_order_live:
+                buy_row = self._orders_by_id.get(int(c.buy_order_id), {})
+                buy_price = Decimal(str(buy_row.get('price') or bid))
+                stale_ticks = max(int(self.cfg.get('entry_aggr_ticks', 0) or 0), int(self.cfg.get('buy_stale_reprice_ticks', 10) or 10))
+                delta_ticks = abs(bid - buy_price) / tick if tick > 0 else Decimal('0')
+                buy_age_ms = int((time.time() - self._quote_birth.get(c.buy_order_id, 0.0)) * 1000)
+                buy_max_age_ms = int(self.cfg.get('buy_max_age_ms', 8000) or 8000)
+                if (tick > 0 and delta_ticks > Decimal(stale_ticks)) or buy_age_ms > buy_max_age_ms:
+                    stale_buy_id = c.buy_order_id
+                    try:
+                        self.orders.cancel(stale_buy_id)
+                    except Exception:
+                        self.logger.log('INFO', '[RUNTIME] cancel race ignored')
+                    self._clear_buy_runtime_order(stale_buy_id)
+                    self._buy_repost_next_tick = True
+                    if tick > 0 and delta_ticks > Decimal(stale_ticks):
+                        self.logger.log('INFO', f'[BUY] stale far from top cancelled id={stale_buy_id} price={buy_price} best_bid={bid} delta_ticks={int(delta_ticks)}')
+                    else:
+                        self.logger.log('INFO', f'[BUY] stale age repost id={stale_buy_id} age_ms={buy_age_ms}')
+                    live_buy_exists = any(str(o.get('side', '')).upper() == 'BUY' for o in self._last_open_orders)
+            for order_id, meta in list(self._optimistic_orders.items()):
+                if str(meta.get('side', '')).upper() != 'BUY' or order_id in open_order_ids or self._optimistic_age_ms(order_id) <= 3000:
+                    continue
+                resolved_status = 'UNKNOWN'
+                try:
+                    st = self.orders.order_status(order_id)
+                    resolved_status = safe_status(st)
+                    if resolved_status == 'FILLED':
+                        exec_qty = Decimal(str(st.get('executedQty', '0') or '0'))
+                        if exec_qty > 0:
+                            fill_price = Decimal(str(st.get('price') or bid))
+                            c.apply_buy_fill(exec_qty, fill_price)
+                            self._on_buy_fill(exec_qty, fill_price)
+                    elif resolved_status in ('NEW', 'PARTIALLY_FILLED'):
+                        c.buy_order_id = int(order_id)
+                        self._active_buy_order_id = int(order_id)
+                    elif c.buy_order_id == int(order_id):
+                        self._clear_buy_runtime_order(int(order_id))
+                except Exception:
+                    if c.buy_order_id == int(order_id):
+                        self._clear_buy_runtime_order(int(order_id))
+                self._optimistic_orders.pop(int(order_id), None)
+                self.logger.log('INFO', f'[RECON] optimistic BUY resolved status={resolved_status}')
             sell_is_position = self._is_sell_position_order(c.sell_order_id)
             if position_mode == 'FLAT' and c.open_position_qty <= min_qty_runtime and c.sell_order_id and not sell_is_position:
                 self._log_throttled('inventory_sell_nonblocking', f'[INV] SELL inventory id={c.sell_order_id} non_blocking', 30.0)
@@ -1126,6 +1172,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     pass
                 elif not buy_allowed:
                     block_reason = 'position_open' if position_mode != 'FLAT' else ('live_or_optimistic_buy' if (live_buy_exists or optimistic_buy_active) else ('inventory_limit' if inv['ratio'] > soft_limit else 'exit_only'))
+                    if block_reason == 'live_or_optimistic_buy' and position_mode == 'FLAT':
+                        near_top = False
+                        if c.buy_order_id and c.buy_order_id in open_order_ids:
+                            buy_live = self._orders_by_id.get(int(c.buy_order_id), {})
+                            buy_live_price = Decimal(str(buy_live.get('price') or bid))
+                            near_ticks = int(self.cfg.get('buy_stale_reprice_ticks', 10) or 10)
+                            near_top = tick > 0 and abs(bid - buy_live_price) <= (Decimal(near_ticks) * tick)
+                        if not near_top:
+                            block_reason = 'buy_reprice_pending'
                     self._log_throttled('block_buy_'+block_reason, f'[BLOCK] buy reason={block_reason}', 5.0)
                 buy_status = None
                 if buy_allowed:
@@ -1173,7 +1228,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 if buy_allowed and should_clear_active_order(c.buy_order_id, buy_status, open_order_ids) and not buy_grace_active:
                     self.logger.log('INFO', f'[RECON] cleared stale BUY id={c.buy_order_id} status={buy_status or "UNKNOWN_ORDER"}')
                     self._clear_buy_runtime_order(c.buy_order_id)
-                if buy_allowed and not c.buy_order_id and not buy_grace_active and not self._pending_buy_order:
+                if buy_allowed and not c.buy_order_id and not buy_grace_active and not self._pending_buy_order and not self._buy_repost_next_tick:
                     qty_n = floor_to_step(buy_quote / bid, step) if bid > 0 else Decimal('0')
                     if qty_n > 0:
                         resp = self._place_safe_maker_buy(qty_n, reason='run_live_cycle')
