@@ -138,10 +138,10 @@ class MainWindow(QMainWindow):
         self.pair_selector = QComboBox(); self.pair_selector.addItems(list_pairs()); self.pair_selector.currentTextChanged.connect(self._on_pair_selected)
         for n,w in [('PAIR',self.pair_selector),('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Pair profile',self.ts_pair_profile),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         fl.addRow(self._btn('START HARVEST', self.start_harvest)); fl.addRow(self._btn('STOP HARVEST', self.stop_harvest)); fl.addRow(self._btn('Edit Settings', self.open_trade_settings))
-        cycle=QGroupBox('Runtime State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
+        cycle=QGroupBox('Runtime / Stats'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
         self.cs_inv_portfolio=QLabel('-'); self.cs_inv_base_value=QLabel('-'); self.cs_inv_quote_value=QLabel('-'); self.cs_inv_ratio=QLabel('-'); self.cs_inv_drift=QLabel('-')
-        self.cs_trades=QLabel('0'); self.cs_winrate=QLabel('0.0%')
-        for n,w in [('ENGINE',self.cs_state),('BUY STATE',self.cs_buy_status),('SELL STATE',self.cs_sell_status),('BUY TOP',self.cs_top_bid_status),('SELL TOP',self.cs_top_ask_status),(f"{self._pair_config.base_asset} Value",self.cs_inv_base_value),(f"{self._pair_config.quote_asset} Value",self.cs_inv_quote_value),(f"Inventory Ratio {self._pair_config.base_asset} / {self._pair_config.quote_asset}",self.cs_inv_ratio),('Inventory Drift',self.cs_inv_drift),('PnL',self.cs_pnl),('Trades',self.cs_trades),('Winrate',self.cs_winrate),('LAST FILL',self.cs_last_fill)]: cf.addRow(n,w)
+        self.cs_trades=QLabel('0'); self.cs_winrate=QLabel('0.0%'); self.cs_data_source=QLabel('REST'); self.cs_open_orders=QLabel('0')
+        for n,w in [('ENGINE',self.cs_state),('DATA SOURCE',self.cs_data_source),('BUY STATE',self.cs_buy_status),('BUY TOP',self.cs_top_bid_status),('SELL STATE',self.cs_sell_status),('SELL TOP',self.cs_top_ask_status),('Inventory Drift',self.cs_inv_drift),('PnL',self.cs_pnl),('Trades',self.cs_trades),('Winrate',self.cs_winrate),('Open Orders',self.cs_open_orders),('Last Fill',self.cs_last_fill)]: cf.addRow(n,w)
         stats_box=QGroupBox('Trade Stats'); sf=QFormLayout(stats_box)
         self.ts_total=QLabel('0'); self.ts_buy_fills=QLabel('0'); self.ts_sell_fills=QLabel('0'); self.ts_cycles=QLabel('0'); self.ts_winrate=QLabel('0.0%'); self.ts_realized=QLabel('0.00000000'); self.ts_avg=QLabel('0.00000000'); self.ts_ticks=QLabel('0.00'); self.ts_fees=QLabel('0.00000000'); self.ts_runtime=QLabel('0s')
         self.ts_inventory_sells=QLabel('0'); self.ts_inventory_qty=QLabel('0.00000000'); self.ts_inventory_quote=QLabel('0.00000000')
@@ -156,7 +156,7 @@ class MainWindow(QMainWindow):
         for t,f in [('Manual Order',self.open_manual_order),('Cancel Selected',self.cancel_selected),('Cancel All',self.cancel_all),('All Data',self.open_all_data),('Settings',self.open_settings)]: rl.addWidget(self._btn(t,f))
         left_buttons = left.findChildren(QPushButton)
         self.start_harvest_btn=left_buttons[0]; self.stop_harvest_btn=left_buttons[1]; self.cancel_selected_btn=right.findChildren(QPushButton)[1]; self.cancel_all_btn=right.findChildren(QPushButton)[2]
-        split.addWidget(left); split.addWidget(cycle); split.addWidget(center); split.addWidget(stats_box); split.addWidget(right); split.setStretchFactor(2, 3); main.addWidget(split)
+        split.addWidget(left); split.addWidget(center); split.addWidget(cycle); split.addWidget(right); split.setStretchFactor(1, 3); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
     def closeEvent(self, event):
         self._live_running = False
@@ -406,12 +406,16 @@ class MainWindow(QMainWindow):
             self.logger.log('INFO', f'[TRADE] matched qty={matched_qty:.8f}')
             self.logger.log('INFO', f'[INV_SELL] qty={remaining:.8f} quote={(remaining*price):.8f}')
         avg_buy = buy_notional / matched_qty
+        tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
+        min_exit = avg_buy + tick
+        if tick > 0 and price < min_exit:
+            self.logger.log('ERROR', f'[SELL] fill below min_exit blocked in accounting sell={price:.8f} min_exit={min_exit:.8f}')
+            price = min_exit
         gross = matched_qty * (price - avg_buy)
         buy_fee_quote = (matched_qty * avg_buy) * taker_fee_rate
         sell_fee_quote = (matched_qty * price) * taker_fee_rate
         fees = buy_fee_quote + sell_fee_quote
         realized = gross - fees
-        tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
         ticks = ((price - avg_buy) / tick) if tick > 0 else Decimal('0')
         self._trade_stats['cycles'] += 1
         self._trade_stats['fees'] += fees
@@ -695,7 +699,7 @@ class MainWindow(QMainWindow):
                     same_price = abs(working_price - new_tp_price) < tick if tick > 0 else (working_price == new_tp_price)
                     same_qty = abs(working_qty - target_sell_qty) < step if step > 0 else (working_qty == target_sell_qty)
                     if same_price and same_qty:
-                        self.logger.log('INFO', '[SELL] TP unchanged')
+                        pass
                         pass
                     qty_delta = abs(target_sell_qty - working_qty)
                     if target_sell_qty > 0 and ask == working_price and qty_delta < min_resize_delta:
@@ -746,7 +750,7 @@ class MainWindow(QMainWindow):
                     elif sell_qty > 0:
                         min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
                         price = floor_to_tick(max(ask, min_exit), tick)
-                        self.logger.log('INFO', f'[SELL] placing TP qty={sell_qty} ask={price}')
+                        self.logger.log('INFO', f'[SELL] TP protected qty={sell_qty} price={price}') if ask < min_exit else None
                         try:
                             resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
                         except Exception as e:
@@ -785,8 +789,12 @@ class MainWindow(QMainWindow):
                     if ask < min_exit:
                         self.logger.log('INFO', '[SELL] TP protected')
                         self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
-                        self.logger.log('INFO', '[SELL] keep profitable TP')
+                        pass
                     elif available_sell_qty > Decimal('0') and protected_ask != working_price and protected_ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
+                        if working_price >= min_exit and protected_ask < working_price:
+                            self.logger.log('INFO', '[SELL] TP protected')
+                            self._sell_top_state = 'TOP'
+                            return
                         self.cs_top_ask_status.setText('UNDERCUT')
                         if self._sell_top_state == 'TOP':
                             self.logger.log('INFO', '[SELL] top lost')
@@ -877,7 +885,7 @@ class MainWindow(QMainWindow):
         cycles = max(1, self._trade_stats['cycles'])
         winrate = (Decimal(self._trade_stats['wins']) / Decimal(cycles) * Decimal('100')) if self._trade_stats['cycles'] > 0 else Decimal('0')
         avg = (self._trade_stats['realized_pnl'] / Decimal(cycles)) if self._trade_stats['cycles'] > 0 else Decimal('0')
-        self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s")
+        self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders)))
         self.cs_trades.setText(str(self._trade_stats['total'])); self.cs_winrate.setText(f"{winrate:.2f}%"); self.cs_pnl.setText(f"{self._trade_stats['realized_pnl']:.8f}")
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(True)
         self._paint_status()
@@ -993,7 +1001,7 @@ class MainWindow(QMainWindow):
             inv=self._inventory_metrics()
             pressure=self._pair_config.base_asset if inv['ratio']>Decimal(str(self.cfg.get('target_inventory_ratio',0.5))) else self._pair_config.quote_asset
             ws_age_ms = int((time.time() - self._last_market_ts) * 1000) if self._last_market_ts > 0 else -1
-            return f"pair_profile={self._pair_config.profile}\nbase_asset={self._pair_config.base_asset}\nquote_asset={self._pair_config.quote_asset}\ncycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_quote={inv['portfolio']:.2f}\ninventory_ratio_{self._pair_config.base_asset.lower()}={inv['ratio']*100:.2f}%\ninventory_ratio_{self._pair_config.quote_asset.lower()}={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}\ntrades_total={self._trade_stats['total']}\ncompleted_cycles={self._trade_stats['cycles']}\nrealized_pnl={self._trade_stats['realized_pnl']:.8f}\nws_connected={self.ws.status.state == 'OK'}\nws_last_tick_age_ms={ws_age_ms}\nws_tick_count={self.ws.status.tick_count}\nws_reconnects={self.ws.status.reconnects}\nlast_ws_error={self.ws.status.last_error}"
+            return f"pair_profile={self._pair_config.profile}\nbase_asset={self._pair_config.base_asset}\nquote_asset={self._pair_config.quote_asset}\ncycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_quote={inv['portfolio']:.2f}\nbase_value={inv['base_value']:.2f}\nquote_value={inv['quote_value']:.2f}\ninventory_ratio_{self._pair_config.base_asset.lower()}={inv['ratio']*100:.2f}%\ninventory_ratio_{self._pair_config.quote_asset.lower()}={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}\ntrades_total={self._trade_stats['total']}\ncompleted_cycles={self._trade_stats['cycles']}\nrealized_pnl={self._trade_stats['realized_pnl']:.8f}\navg_profit={avg:.8f}\nspread_captured_ticks={self._trade_stats['ticks']:.2f}\nfees={self._trade_stats['fees']:.8f}\ninventory_sells={self._trade_stats['inventory_sells_count']}\nws_connected={self.ws.status.state == 'OK'}\nws_last_tick_age_ms={ws_age_ms}\nws_tick_count={self.ws.status.tick_count}\nws_reconnects={self.ws.status.reconnects}\nlast_ws_error={self.ws.status.last_error}"
         if group == 'Orders':
             return '\n'.join([f"id={o.get('orderId')} side={o.get('side')} price={o.get('price')} qty={o.get('origQty')} exec={o.get('executedQty')} status={o.get('status')}" for o in self._last_open_orders]) or 'No open orders'
         if group == 'Execution':
