@@ -533,7 +533,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             if qty_n <= 0:
                 self.logger.log('RISK', f'[RISK] blocked: SELL notional exceeds cap notional={raw_notional:.8f} cap={sell_cap:.8f}')
                 return None
-        min_notional = Decimal(str(self._symbol_filters.get('minNotional', '0') or '0'))
+        min_notional = Decimal(str(self.get_symbol_filters().get('minNotional', '0') or '0'))
         qty_s = format_decimal_for_step(qty_n, step)
         try:
             notional = qty_n * Decimal(price)
