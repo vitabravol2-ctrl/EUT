@@ -138,6 +138,9 @@ class MainWindow(QMainWindow):
         self._quote_birth_mono: dict[int, float] = {}
         self._exit_reason = 'NONE'
         self._buy_repost_next_tick = False
+        self._runtime_chain_state = 'FLAT'
+        self._sl_pending_started_mono = 0.0
+        self._last_chain_diag_mono = 0.0
         self._data_mode = 'REST'
         self._last_data_mode = None
         self._last_market_ts = 0.0
@@ -700,6 +703,38 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         c = self._cycle
         buy_id = c.buy_order_id
         sell_id = c.sell_order_id
+        bid = Decimal(str(self._last_market_snapshot.get('bid', '0') or '0'))
+        ask = Decimal(str(self._last_market_snapshot.get('ask', '0') or '0'))
+        buy_orders = [o for o in self._last_open_orders if str(o.get('side', '')).upper() == 'BUY' and o.get('orderId')]
+        sell_orders = [o for o in self._last_open_orders if str(o.get('side', '')).upper() == 'SELL' and o.get('orderId')]
+        if len(buy_orders) > 1 and bid > 0:
+            keep = min(buy_orders, key=lambda o: abs(Decimal(str(o.get('price') or bid)) - bid))
+            keep_id = int(keep.get('orderId'))
+            for o in buy_orders:
+                oid = int(o.get('orderId'))
+                if oid == keep_id:
+                    continue
+                try:
+                    self.orders.cancel(oid)
+                    self.logger.log('INFO', f'[RECON] duplicate BUY canceled id={oid} keep={keep_id}')
+                except Exception:
+                    self.logger.log('INFO', '[RUNTIME] cancel race ignored')
+            c.buy_order_id = keep_id
+            self._active_buy_order_id = keep_id
+        if len(sell_orders) > 1 and ask > 0:
+            keep = min(sell_orders, key=lambda o: abs(Decimal(str(o.get('price') or ask)) - ask))
+            keep_id = int(keep.get('orderId'))
+            for o in sell_orders:
+                oid = int(o.get('orderId'))
+                if oid == keep_id:
+                    continue
+                try:
+                    self.orders.cancel(oid)
+                    self.logger.log('INFO', f'[RECON] duplicate SELL canceled id={oid} keep={keep_id}')
+                except Exception:
+                    self.logger.log('INFO', '[RUNTIME] cancel race ignored')
+            c.sell_order_id = keep_id
+            self._active_sell_order_id = keep_id
         if buy_id and buy_id not in live_order_ids and self._is_optimistic_grace_active(buy_id):
             self.logger.log('INFO', f'[RECON] keep optimistic BUY id={buy_id} age={self._optimistic_age_ms(buy_id)}ms')
         if sell_id and sell_id not in live_order_ids and self._is_optimistic_grace_active(sell_id):
@@ -1064,11 +1099,16 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             open_order_ids = {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}
             self._reconcile_runtime_order_ids(open_order_ids)
 
+            now_mono = time.monotonic()
             buy_grace_active = c.buy_order_id and time.time() < self._pending_buy_grace_until
             sell_grace_active = c.sell_order_id and time.time() < self._pending_sell_grace_until
             min_qty_runtime = Decimal(str(filters.get('minQty', '0') or '0'))
             has_open_position = c.open_position_qty > min_qty_runtime
             position_mode = 'LONG_OPEN' if has_open_position else 'FLAT'
+            if c.sell_order_id and has_open_position:
+                position_mode = 'SELL_WORKING'
+            elif c.buy_order_id and not has_open_position:
+                position_mode = 'BUY_WORKING'
             if position_mode == 'FLAT' and c.open_position_qty <= min_qty_runtime and c.sell_order_id:
                 sell_live = c.sell_order_id in open_order_ids
                 base_free = Decimal(str(self._balances.get('BASE_free', 0) or 0))
@@ -1084,7 +1124,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self._clear_sell_runtime_order()
                 if had_stale:
                     self.logger.log('INFO', '[RECON] FLAT stale ids cleared')
-            self._log_throttled('runtime_diag', f"[RUNTIME] state={position_mode} spread={spread_ticks} fill={fill_state} buy_order={c.buy_order_id or '-'} sell_order={c.sell_order_id or '-'} open_qty={c.open_position_qty}", 5.0)
+            if now_mono - self._last_chain_diag_mono >= 3.0:
+                buy_price = Decimal(str(self._orders_by_id.get(int(c.buy_order_id or 0), {}).get('price') or '0'))
+                sell_price = Decimal(str(self._orders_by_id.get(int(c.sell_order_id or 0), {}).get('price') or '0'))
+                buy_delta = ((bid - buy_price) / tick) if (tick > 0 and buy_price > 0) else Decimal('0')
+                sell_delta = ((sell_price - ask) / tick) if (tick > 0 and sell_price > 0) else Decimal('0')
+                self.logger.log('INFO', f'[CHAIN] state={position_mode} bid={bid} ask={ask} spread={int(spread_ticks)} pos_qty={c.open_position_qty} avg={c.buy_avg_price} buy_id={c.buy_order_id or "-"} buy_price={buy_price or "-"} buy_delta={int(buy_delta)} sell_id={c.sell_order_id or "-"} sell_price={sell_price or "-"} sell_delta={int(sell_delta)} reason={self._exit_reason}')
+                self._last_chain_diag_mono = now_mono
 
             # BUY engine (independent)
             inv = self._inventory_metrics()
@@ -1195,7 +1241,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             delta = exec_qty - c.buy_filled_qty
                             if delta > 0:
                                 c.apply_buy_fill(delta, Decimal(str(st.get('price') or bid)))
-                                self.logger.log('INFO', f'[BUY] fill qty={delta}')
+                                self.logger.log('INFO', f'[BUY] filled qty={delta} price={Decimal(str(st.get("price") or bid))}')
                                 self.logger.log('INFO', f'[CYCLE] open_qty={c.open_position_qty} avg_open_buy={c.buy_avg_price}')
                                 self._on_buy_fill(delta, Decimal(str(st.get('price') or bid)))
                                 # GUI updates are timer-driven only (SELL branch).
@@ -1214,6 +1260,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                     self._pending_buy_grace_until = 0.0
                                     self.logger.log('INFO', '[BUY] filled -> cancel active BUY')
                                 position_mode = 'LONG_OPEN'
+                                self.logger.log('INFO', '[CYCLE] BUY_FILLED -> LONG_OPEN')
                                 self.logger.log('INFO', '[SELL] increase quote qty=inventory refresh')
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                         except Exception as e:
@@ -1297,7 +1344,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self._pending_buy_grace_until = 0.0
                 self.logger.log('INFO', f'[BUY] cancelled in mode={position_mode}')
 
-            if sl_triggered:
+            sl_confirm_ms = int(self.cfg.get('sl_confirm_ms', 3000) or 3000)
+            if sl_triggered and self._sl_pending_started_mono <= 0:
+                self._sl_pending_started_mono = now_mono
+                self.logger.log('INFO', f'[SL] pending bid={bid} sl={sl_price} age_ms=0')
+            if (not sl_triggered) and self._sl_pending_started_mono > 0:
+                self._sl_pending_started_mono = 0.0
+                self.logger.log('INFO', '[SL] cancelled price recovered')
+            sl_confirmed = sl_triggered and self._sl_pending_started_mono > 0 and int((now_mono - self._sl_pending_started_mono) * 1000) >= sl_confirm_ms
+            if sl_confirmed:
                 self._set_exit_reason('SL_EXIT')
                 position_mode = 'EXIT_SL'
                 exit_only_mode = True
@@ -1314,7 +1369,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     self._active_buy_order_id = None
                     self._pending_buy_order = None
                     self._pending_buy_grace_until = 0.0
-                self.logger.log('INFO', f'[SL] triggered avg={c.buy_avg_price} bid={bid} sl={sl_price}')
+                self.logger.log('INFO', f'[SL] confirmed avg={c.buy_avg_price} bid={bid} sl={sl_price}')
 
             # SELL maintain (exchange-balance driven only)
             try:
@@ -1362,7 +1417,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                         self._clear_sell_runtime_order()
                                     c.state = CycleState.WAIT_READY
                                     self._exit_buy_disabled_logged = False
-                                    self.logger.log('INFO', '[CYCLE] closed -> FLAT ready_for_next_buy')
+                                    self._sl_pending_started_mono = 0.0
+                                    self.logger.log('INFO', '[CYCLE] SELL_FILLED -> FLAT')
                                 # GUI updates are timer-driven only (SELL branch).
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                                 # GUI updates are timer-driven only (SELL branch).
