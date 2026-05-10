@@ -680,6 +680,19 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self._pending_sell_order = None
         self._pending_sell_grace_until = 0.0
 
+    def _is_sell_position_order(self, order_id: int | None) -> bool:
+        if not order_id:
+            return False
+        if self._cycle.open_position_qty <= Decimal('0'):
+            return False
+        order = self._orders_by_id.get(int(order_id), {})
+        orig_qty = Decimal(str(order.get('origQty') or '0'))
+        executed_qty = Decimal(str(order.get('executedQty') or '0'))
+        remaining_qty = max(Decimal('0'), orig_qty - executed_qty)
+        if remaining_qty <= Decimal('0'):
+            return False
+        return self._cycle.open_position_qty > Decimal('0')
+
     def _reconcile_runtime_order_ids(self, live_order_ids):
         c = self._cycle
         buy_id = c.buy_order_id
@@ -1053,6 +1066,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             min_qty_runtime = Decimal(str(filters.get('minQty', '0') or '0'))
             has_open_position = c.open_position_qty > min_qty_runtime
             position_mode = 'LONG_OPEN' if has_open_position else 'FLAT'
+            if position_mode == 'FLAT' and c.open_position_qty <= min_qty_runtime and c.sell_order_id:
+                sell_live = c.sell_order_id in open_order_ids
+                base_free = Decimal(str(self._balances.get('BASE_free', 0) or 0))
+                base_locked = Decimal(str(self._balances.get('BASE_locked', 0) or 0))
+                has_base_inventory = (base_free + base_locked) > Decimal('0')
+                if (not sell_live) or (not has_base_inventory):
+                    stale_sell_id = c.sell_order_id
+                    self._clear_sell_runtime_order(stale_sell_id)
+                    self.logger.log('INFO', f'[RECON] FLAT cleared stale SELL blocker id={stale_sell_id}')
             if position_mode == 'FLAT' and c.open_position_qty <= min_qty_runtime and len(open_order_ids) == 0:
                 had_stale = bool(c.buy_order_id or c.sell_order_id or self._active_buy_order_id or self._active_sell_order_id or self._pending_buy_order or self._pending_sell_order)
                 self._clear_buy_runtime_order()
@@ -1078,6 +1100,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 for order_id, v in self._optimistic_orders.items()
             )
             buy_order_live = bool(c.buy_order_id and c.buy_order_id in open_order_ids)
+            sell_is_position = self._is_sell_position_order(c.sell_order_id)
+            if position_mode == 'FLAT' and c.open_position_qty <= min_qty_runtime and c.sell_order_id and not sell_is_position:
+                self._log_throttled('inventory_sell_nonblocking', f'[INV] SELL inventory id={c.sell_order_id} non_blocking', 30.0)
             buy_allowed = (position_mode == 'FLAT') and (not exit_only_mode) and inv['ratio'] <= soft_limit and (not live_buy_exists) and (not optimistic_buy_active) and c.open_position_qty <= min_qty_runtime
             if exit_only_mode and c.buy_order_id:
                 try:
@@ -1266,8 +1291,18 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 self._on_sell_fill(delta, Decimal(str(st.get('price') or ask)))
                                 min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
                                 if c.open_position_qty <= min_qty:
+                                    self._clear_buy_runtime_order()
+                                    live_sell_position_exists = any(
+                                        int(o.get('orderId')) != int(c.sell_order_id or -1)
+                                        and str(o.get('side', '')).upper() == 'SELL'
+                                        and c.open_position_qty > min_qty
+                                        for o in self._last_open_orders
+                                    )
+                                    if not live_sell_position_exists:
+                                        self._clear_sell_runtime_order()
+                                    c.state = CycleState.WAIT_READY
                                     self._exit_buy_disabled_logged = False
-                                    self.logger.log('INFO', '[CYCLE] closed -> FLAT')
+                                    self.logger.log('INFO', '[CYCLE] closed -> FLAT ready_for_next_buy')
                                 # GUI updates are timer-driven only (SELL branch).
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                                 # GUI updates are timer-driven only (SELL branch).
@@ -1291,6 +1326,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids) and not sell_grace_active:
                         self.logger.log('INFO', f'[RECON] cleared stale SELL id={c.sell_order_id} status={sell_status or "UNKNOWN_ORDER"}')
                         self._clear_sell_runtime_order(c.sell_order_id)
+                        if c.open_position_qty <= min_qty_runtime:
+                            self.logger.log('INFO', '[INV] cleanup sell finished, harvest can continue')
                     # GUI updates are timer-driven only (SELL branch).
                     # GUI updates are timer-driven only (SELL branch).
                     # GUI updates are timer-driven only (SELL branch).

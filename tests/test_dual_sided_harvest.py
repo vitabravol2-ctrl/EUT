@@ -252,3 +252,16 @@ def test_sell_resizes_down_when_exposure_reduced(qapp):
     w.cfg['max_sell_usdt_exposure'] = 120
     w._run_live_cycle()
     assert cancelled == [99]
+
+
+def test_flat_stale_sell_blocker_is_cleared_and_buy_continues(qapp):
+    w = _ready_window()
+    w._cycle.open_position_qty = Decimal('0')
+    w._cycle.sell_order_id = 555
+    w._active_sell_order_id = 555
+    w._balances['EURI_free'] = '0'
+    w._balances['EURI_locked'] = '0'
+    w._last_open_orders = []
+    w._run_live_cycle()
+    assert w._cycle.sell_order_id is None
+    assert any(side == 'BUY' for side, _, _ in w.orders.placed)
