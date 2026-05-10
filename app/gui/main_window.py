@@ -992,6 +992,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
             buy_grace_active = c.buy_order_id and time.time() < self._pending_buy_grace_until
             sell_grace_active = c.sell_order_id and time.time() < self._pending_sell_grace_until
+            min_qty_runtime = Decimal(str(filters.get('minQty', '0') or '0'))
+            has_open_position = c.open_position_qty > min_qty_runtime
+            position_mode = 'LONG_OPEN' if has_open_position else 'FLAT'
 
             # BUY engine (independent)
             inv = self._inventory_metrics()
@@ -1004,7 +1007,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10))) * inv['buy_mult']
             min_buy_free = Decimal(str(self.cfg.get('min_buy_free_usdt', 5.0)))
             soft_limit = Decimal(str(self.cfg.get('inventory_soft_limit', 0.65)))
-            buy_allowed = (not exit_only_mode) and inv['ratio'] <= soft_limit and not c.buy_order_id
+            buy_allowed = (position_mode == 'FLAT') and (not exit_only_mode) and inv['ratio'] <= soft_limit and not c.buy_order_id and c.open_position_qty <= min_qty_runtime
             if exit_only_mode and c.buy_order_id:
                 try:
                     self.orders.cancel(c.buy_order_id)
@@ -1029,7 +1032,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     if exit_only_mode:
                         self.logger.log('RISK', 'buy blocked: inventory heavy')
                     else:
-                        self.logger.log('INFO', '[BUY] skipped: exit priority')
+                        self.logger.log('INFO', f'[BUY] skipped mode={position_mode}')
                 buy_status = None
                 if buy_allowed:
                     if c.buy_order_id:
@@ -1048,6 +1051,18 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 self._refresh_balances_live('buy_fill')
                                 # GUI updates are timer-driven only (SELL branch).
                                 self._refresh_orders_live('buy_fill')
+                                if c.buy_order_id:
+                                    try:
+                                        self.orders.cancel(c.buy_order_id)
+                                    except Exception:
+                                        self.logger.log('INFO', '[RUNTIME] cancel race ignored')
+                                    self._quote_birth.pop(c.buy_order_id, None)
+                                    c.buy_order_id = None
+                                    self._active_buy_order_id = None
+                                    self._pending_buy_order = None
+                                    self._pending_buy_grace_until = 0.0
+                                    self.logger.log('INFO', '[BUY] filled -> cancel active BUY')
+                                position_mode = 'LONG_OPEN'
                                 self.logger.log('INFO', '[SELL] increase quote qty=inventory refresh')
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                         except Exception as e:
@@ -1114,10 +1129,25 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self.logger.log('INFO', '[BUY] top acquired')
                         self._buy_top_state = 'TOP'
 
+            has_open_position = c.open_position_qty > min_qty_runtime
+            position_mode = 'LONG_OPEN' if has_open_position else 'FLAT'
             stop_loss_ticks = Decimal(str(self.cfg.get('stop_loss_ticks', 300) or 300))
-            sl_price = c.buy_avg_price - (stop_loss_ticks * tick) if c.open_position_qty > Decimal('0') else Decimal('0')
-            sl_triggered = c.open_position_qty > Decimal('0') and bid <= sl_price
+            sl_price = c.buy_avg_price - (stop_loss_ticks * tick) if has_open_position else Decimal('0')
+            sl_triggered = has_open_position and bid <= sl_price
+            if (position_mode in ('LONG_OPEN', 'EXIT_SL')) and c.buy_order_id:
+                try:
+                    self.orders.cancel(c.buy_order_id)
+                except Exception:
+                    self.logger.log('INFO', '[RUNTIME] cancel race ignored')
+                self._quote_birth.pop(c.buy_order_id, None)
+                c.buy_order_id = None
+                self._active_buy_order_id = None
+                self._pending_buy_order = None
+                self._pending_buy_grace_until = 0.0
+                self.logger.log('INFO', f'[BUY] cancelled in mode={position_mode}')
+
             if sl_triggered:
+                position_mode = 'EXIT_SL'
                 exit_only_mode = True
                 if c.buy_order_id:
                     try:
@@ -1167,7 +1197,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
                                 if c.open_position_qty <= min_qty:
                                     self._exit_buy_disabled_logged = False
-                                    self.logger.log('INFO', '[CYCLE] position closed, resume harvest')
+                                    self.logger.log('INFO', '[CYCLE] closed -> FLAT')
                                 # GUI updates are timer-driven only (SELL branch).
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                                 # GUI updates are timer-driven only (SELL branch).
@@ -1265,7 +1295,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             else:
                                 self.logger.log('INFO', '[SELL] resize up skipped insufficient new free inventory')
                     if not c.sell_order_id and not sell_grace_active and not self._pending_sell_order:
-                        sell_qty = floor_to_step(exchange_free_euri if exit_only_mode else min(exchange_free_euri, target_sell_qty), step)
+                        sell_qty = floor_to_step(exchange_free_euri if (not has_open_position and exchange_free_euri > min_qty_runtime) else c.open_position_qty, step)
+                        if not has_open_position and exchange_free_euri > min_qty_runtime:
+                            self.logger.log('INFO', '[INV] cleanup mode')
                         if sell_qty < min_qty:
                             self.logger.log('INFO', '[SELL] skipped: no free inventory after refresh')
                         elif sell_qty > 0:
@@ -1277,7 +1309,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 emergency_floor = c.buy_avg_price - (emergency_loss_ticks * tick)
                                 if sl_triggered:
                                     min_exit = max(bid + tick, bid + tick)
-                                    self.logger.log('INFO', f'[EXIT] stop-loss unload price={min_exit}')
+                                    self.logger.log('INFO', f'[EXIT] SL unload price={min_exit}')
                                 else:
                                     min_exit = self._exit_only_target_price(
                                         ask=ask,
@@ -1319,7 +1351,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         os = self._orders_by_id.get(c.sell_order_id, {})
                         working_price = Decimal(str(os.get('price') or ask))
                         min_reprice_ticks = Decimal(str(self.cfg.get('minimum_sell_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
-                        min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
+                        min_exit = max(c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick), bid + tick)
                         if exit_only_mode:
                             sell_age = max(0, time.time() - self._sell_started_at) if c.sell_order_id else 0
                             emergency_loss_ticks = Decimal(str(self.cfg.get('emergency_loss_ticks', 50) or 50))
