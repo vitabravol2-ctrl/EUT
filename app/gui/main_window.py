@@ -484,8 +484,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         price_s = format_decimal_for_tick(price, tick)
         if Decimal(price_s) >= ask_fresh and tick > 0:
             price_s = format_decimal_for_tick(ask_fresh - tick, tick)
+        buy_cap = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10) or 10))
+        notional = qty_n * Decimal(price_s)
+        if notional > buy_cap:
+            self.logger.log('RISK', f'[RISK] blocked: BUY notional exceeds cap notional={notional:.8f} cap={buy_cap:.8f}')
+            return None
         try:
-            return self.orders.place_limit_maker('BUY', qty_s, price_s)
+            resp = self.orders.place_limit_maker('BUY', qty_s, price_s)
+            self.logger.log('INFO', f'[ORDER] BUY placed qty={qty_s} price={price_s} notional={notional:.8f}')
+            return resp
         except Exception as e:
             if self._is_would_take_error(e):
                 self.logger.log('INFO', f'[BUY] maker rejected would_take price={price_s} bid={bid_fresh} ask={ask_fresh} reason={reason}')
@@ -495,7 +502,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 if Decimal(retry_s) >= ask_retry and tick > 0:
                     retry_s = format_decimal_for_tick(ask_retry - tick, tick)
                 try:
-                    return self.orders.place_limit_maker('BUY', qty_s, retry_s)
+                    retry_notional = qty_n * Decimal(retry_s)
+                    if retry_notional > buy_cap:
+                        self.logger.log('RISK', f'[RISK] blocked: BUY notional exceeds cap notional={retry_notional:.8f} cap={buy_cap:.8f}')
+                        return None
+                    resp = self.orders.place_limit_maker('BUY', qty_s, retry_s)
+                    self.logger.log('INFO', f'[ORDER] BUY placed qty={qty_s} price={retry_s} notional={retry_notional:.8f}')
+                    return resp
                 except Exception as e2:
                     if self._is_would_take_error(e2):
                         self.logger.log('INFO', '[BUY] maker rejected would_take skip')
@@ -513,9 +526,19 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         price = format_decimal_for_tick(safe_price, tick)
         if Decimal(price) <= fresh_bid and tick > 0:
             price = format_decimal_for_tick(fresh_bid + tick, tick)
+        sell_cap = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10) or 10))
+        raw_notional = qty_n * Decimal(price)
+        if raw_notional > sell_cap and Decimal(price) > 0:
+            qty_n = floor_to_step(sell_cap / Decimal(price), step)
+            if qty_n <= 0:
+                self.logger.log('RISK', f'[RISK] blocked: SELL notional exceeds cap notional={raw_notional:.8f} cap={sell_cap:.8f}')
+                return None
         qty_s = format_decimal_for_step(qty_n, step)
         try:
-            return self.orders.place_limit_maker('SELL', qty_s, price)
+            notional = qty_n * Decimal(price)
+            resp = self.orders.place_limit_maker('SELL', qty_s, price)
+            self.logger.log('INFO', f'[ORDER] SELL placed qty={qty_s} price={price} notional={notional:.8f}')
+            return resp
         except Exception as e:
             if self._is_would_take_error(e):
                 fresh_bid, fresh_ask = self._fresh_market_bid_ask()
@@ -524,7 +547,17 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 if Decimal(retry_price) <= fresh_bid and tick > 0:
                     retry_price = format_decimal_for_tick(fresh_bid + tick, tick)
                 try:
-                    return self.orders.place_limit_maker('SELL', qty_s, retry_price)
+                    retry_notional = qty_n * Decimal(retry_price)
+                    if retry_notional > sell_cap and Decimal(retry_price) > 0:
+                        qty_n = floor_to_step(sell_cap / Decimal(retry_price), step)
+                        if qty_n <= 0:
+                            self.logger.log('RISK', f'[RISK] blocked: SELL notional exceeds cap notional={retry_notional:.8f} cap={sell_cap:.8f}')
+                            return None
+                        qty_s = format_decimal_for_step(qty_n, step)
+                        retry_notional = qty_n * Decimal(retry_price)
+                    resp = self.orders.place_limit_maker('SELL', qty_s, retry_price)
+                    self.logger.log('INFO', f'[ORDER] SELL placed qty={qty_s} price={retry_price} notional={retry_notional:.8f}')
+                    return resp
                 except Exception as e2:
                     if self._is_would_take_error(e2):
                         self.logger.log('INFO', '[SELL] maker rejected would_take skip')
@@ -998,6 +1031,21 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def _start_live_runtime(self):
         try:
             self.logger.log('INFO', '[LIVE] _start_live_runtime enter')
+            for order in self._last_open_orders:
+                side = str(order.get('side', '')).upper()
+                if side not in {'BUY', 'SELL'}:
+                    continue
+                price = Decimal(str(order.get('price') or '0'))
+                orig = Decimal(str(order.get('origQty') or '0'))
+                exe = Decimal(str(order.get('executedQty') or '0'))
+                rem = max(Decimal('0'), orig - exe)
+                notional = rem * price
+                cap = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10) if side == 'BUY' else self.cfg.get('max_sell_usdt_exposure', 10)))
+                if notional > cap:
+                    self.logger.log('RISK', f'[RISK] existing order exceeds cap side={side} notional={notional:.8f} cap={cap:.8f}')
+                    self.logger.log('RISK', '[RISK] harvest blocked until open oversized orders are cancelled')
+                    self._live_running = False
+                    return self._cycle.state, self._cycle.state
             self._live_running = True
             self._runtime_active = True
             self._cycle_started_at = time.time()
@@ -1140,7 +1188,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             if exit_only_mode:
                 self._log_throttled('exit_only_mode', f'[EXIT] mode active risk={risk_state}', 7.0)
             available_buy_usdt = Decimal(str(self._balances.get('QUOTE_free', 0)))
-            buy_quote = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10))) * inv['buy_mult']
+            max_buy_exposure = Decimal(str(self.cfg.get('max_buy_usdt_exposure', 10) or 10))
+            buy_quote = max_buy_exposure * inv['buy_mult']
             min_buy_free = Decimal(str(self.cfg.get('min_buy_free_usdt', 5.0)))
             soft_limit = Decimal(str(self.cfg.get('inventory_soft_limit', 0.65)))
             live_buy_exists = any(str(o.get('side', '')).upper() == 'BUY' for o in self._last_open_orders)
@@ -1278,7 +1327,31 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                     self.logger.log('INFO', f'[RECON] cleared stale BUY id={c.buy_order_id} status={buy_status or "UNKNOWN_ORDER"}')
                     self._clear_buy_runtime_order(c.buy_order_id)
                 if buy_allowed and not c.buy_order_id and not buy_grace_active and not self._pending_buy_order and not self._buy_repost_next_tick:
-                    qty_n = floor_to_step(buy_quote / bid, step) if bid > 0 else Decimal('0')
+                    active_buy_quote = Decimal('0')
+                    for order in self._last_open_orders:
+                        if str(order.get('side', '')).upper() != 'BUY':
+                            continue
+                        price_o = Decimal(str(order.get('price') or '0'))
+                        orig = Decimal(str(order.get('origQty') or '0'))
+                        exe = Decimal(str(order.get('executedQty') or '0'))
+                        rem = max(Decimal('0'), orig - exe)
+                        active_buy_quote += rem * price_o
+                    open_position_quote = Decimal(str(self._trade_ledger.snapshot().get('open_quote_cost', Decimal('0'))))
+                    remaining_buy_budget = max_buy_exposure - active_buy_quote - open_position_quote
+                    min_notional = Decimal(str(filters.get('minNotional', '0') or '0'))
+                    if remaining_buy_budget <= min_notional:
+                        self.logger.log('RISK', f'[RISK] buy blocked: exposure cap remaining={remaining_buy_budget:.8f}')
+                        qty_n = Decimal('0')
+                    else:
+                        buy_quote_budget = min(remaining_buy_budget, available_buy_usdt)
+                        qty_n = floor_to_step(buy_quote_budget / bid, step) if bid > 0 else Decimal('0')
+                        notional = qty_n * bid
+                        if notional > max_buy_exposure and bid > 0:
+                            qty_n = floor_to_step(max_buy_exposure / bid, step)
+                            notional = qty_n * bid
+                        self.logger.log('INFO', f'[SIZE] BUY quote={buy_quote_budget:.8f} qty={qty_n:.8f} price={bid:.8f} cap={max_buy_exposure:.8f} active={active_buy_quote:.8f} remaining={remaining_buy_budget:.8f}')
+                        if notional < min_notional:
+                            qty_n = Decimal('0')
                     if qty_n > 0:
                         resp = self._place_safe_maker_buy(qty_n, reason='run_live_cycle')
                         if not resp:
@@ -1522,7 +1595,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._set_exit_reason('SL_EXIT')
                         else:
                             self._set_exit_reason('TP_EXIT')
-                        sell_qty = floor_to_step(exchange_free_euri if (not has_open_position and exchange_free_euri > min_qty_runtime) else c.open_position_qty, step)
+                        sell_cap = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10) or 10))
+                        if has_open_position:
+                            sell_qty = min(c.open_position_qty, floor_to_step(exchange_free_euri + active_sell_remaining_qty, step))
+                            mode = 'POSITION'
+                        else:
+                            sell_qty = min(exchange_free_euri, floor_to_step(sell_cap / ask, step) if ask > 0 else Decimal('0'))
+                            mode = 'INVENTORY'
+                        sell_qty = floor_to_step(sell_qty, step)
+                        self.logger.log('INFO', f'[SIZE] SELL qty={sell_qty:.8f} price={ask:.8f} cap={sell_cap:.8f} mode={mode}')
                         if not has_open_position and exchange_free_euri > min_qty_runtime:
                             self.logger.log('INFO', '[INV] cleanup mode')
                         if sell_qty < min_qty:

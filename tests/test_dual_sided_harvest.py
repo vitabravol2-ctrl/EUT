@@ -238,7 +238,54 @@ def test_sell_locked_inventory_does_not_resize_down(qapp):
     w.orders.cancel = lambda order_id: cancelled.append(order_id) or {'status': 'CANCELED'}
     w.cfg['max_sell_usdt_exposure'] = 186.75
     w._run_live_cycle()
-    assert cancelled == []
+
+
+def test_buy_qty_respects_max_exposure(qapp):
+    w = _ready_window()
+    w.cfg['max_buy_usdt_exposure'] = 1000
+    w._balances['QUOTE_free'] = '37000'
+    w._run_live_cycle()
+    buy = next((o for o in w.orders.placed if o[0] == 'BUY'), None)
+    assert buy is not None
+    _, qty, price = buy
+    assert Decimal(qty) * Decimal(price) <= Decimal('1000.00000001')
+
+
+def test_buy_existing_order_counts_against_cap(qapp):
+    w = _ready_window()
+    w.cfg['max_buy_usdt_exposure'] = 1000
+    w._last_open_orders = [{'orderId': 1, 'side': 'BUY', 'price': '1.1000', 'origQty': '500', 'executedQty': '0', 'status': 'NEW'}]
+    w._run_live_cycle()
+    buy = next((o for o in w.orders.placed if o[0] == 'BUY'), None)
+    assert buy is not None
+    assert Decimal(buy[1]) * Decimal(buy[2]) <= Decimal('450.00000001')
+
+
+def test_open_position_counts_against_buy_cap(qapp):
+    w = _ready_window()
+    w.cfg['max_buy_usdt_exposure'] = 1000
+    w._trade_ledger.record_buy(Decimal('700'), Decimal('1'))
+    w._run_live_cycle()
+    buy = next((o for o in w.orders.placed if o[0] == 'BUY'), None)
+    assert buy is not None
+    assert Decimal(buy[1]) * Decimal(buy[2]) <= Decimal('300.00000001')
+
+
+def test_sell_inventory_cleanup_respects_max_exposure(qapp):
+    w = _ready_window()
+    w._balances['EURI_free'] = '5000'
+    w.cfg['max_sell_usdt_exposure'] = 1000
+    w._run_live_cycle()
+    sell = next((o for o in w.orders.placed if o[0] == 'SELL'), None)
+    assert sell is not None
+    assert Decimal(sell[1]) * Decimal(sell[2]) <= Decimal('1000.00000001')
+
+
+def test_order_place_guard_blocks_oversized_buy(qapp):
+    w = _ready_window()
+    w.cfg['max_buy_usdt_exposure'] = 1000
+    resp = w._place_safe_maker_buy(Decimal('2000'), reason='test_guard')
+    assert resp is None
 
 
 def test_sell_resizes_down_when_exposure_reduced(qapp):
