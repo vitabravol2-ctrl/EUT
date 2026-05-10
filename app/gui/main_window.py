@@ -315,7 +315,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def _build_fill_observer(self):
         fill_window_ms = int(self.cfg.get('fill_window_ms', self.cfg.get('min_stable_ms', 3000)))
         block_high_activity = bool(self.cfg.get('fill_block_high_activity', False))
-        return FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)), fill_window_ms=fill_window_ms, block_high_activity=block_high_activity)
+        return FillObserver(int(self.cfg.get('min_spread_ticks',2)), int(self.cfg.get('min_stable_ms',3000)), symbol=str(self.cfg.get('symbol', 'EURIUSDT')), fill_window_ms=fill_window_ms, block_high_activity=block_high_activity)
     def apply_trade_settings(self,v): self.cfg.update(v); save_config(self.cfg); self._sync_trade_settings_labels(); self._fill_observer=self._build_fill_observer()
     def _on_pair_selected(self, symbol: str):
         if not symbol or symbol == self.cfg.get('symbol'):
@@ -444,6 +444,10 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self.logger.log('INFO', '[WS] heartbeat ok')
             metrics=self._spread_engine.observe(bid, ask, float(market.get('latency_ms',0)))
             self._spread_metrics=metrics
+            tick = Decimal(str(self._exchange_filters.get('tickSize', '0.0001') or '0.0001'))
+            spread_raw = ask - bid if ask > bid else Decimal('0')
+            spread_ticks = (spread_raw / tick) if tick > 0 else Decimal('0')
+            self.logger.log('INFO', f"[MARKET] symbol={self.cfg.get('symbol','EURIUSDT')} bid={bid} ask={ask} tickSize={tick} spread_raw={spread_raw} spread_ticks={spread_ticks}")
             self._set_label_text(self.ss_ticks, f"raw={metrics.snapshot.spread:.8f} | ticks={metrics.snapshot.spread_ticks:.2f}")
             self._set_label_text(self.ss_lifetime, f"{metrics.state.spread_lifetime_ms}ms")
             self._set_label_text(self.ss_bid, f"{metrics.state.best_bid_unchanged_ms}ms")
@@ -611,11 +615,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         reasons = []
         if spread_ticks < Decimal(str(self.cfg.get('min_spread_ticks', 2))):
             reasons.append('spread below min')
-        if obs.bid_lifetime_ms < int(self.cfg.get('min_stable_ms', 3000)):
+        is_btcu = str(self.cfg.get('symbol', 'EURIUSDT')).upper() == 'BTCU'
+        if not is_btcu and obs.bid_lifetime_ms < int(self.cfg.get('min_stable_ms', 3000)):
             reasons.append('bid unstable')
-        if obs.ask_lifetime_ms < int(self.cfg.get('min_stable_ms', 3000)):
+        if not is_btcu and obs.ask_lifetime_ms < int(self.cfg.get('min_stable_ms', 3000)):
             reasons.append('ask unstable')
-        if obs.fill_window_estimate_ms < int(self.cfg.get('fill_window_ms', self.cfg.get('min_stable_ms', 3000))):
+        if not is_btcu and obs.fill_window_estimate_ms < int(self.cfg.get('fill_window_ms', self.cfg.get('min_stable_ms', 3000))):
             reasons.append('window too short')
         reason = ', '.join(reasons) if reasons else 'unknown'
         return f'[FILL] not possible reason={reason} bid={bid} ask={ask} spread_ticks={spread_ticks:.2f} bid_lifetime_ms={obs.bid_lifetime_ms} ask_lifetime_ms={obs.ask_lifetime_ms} market_activity={obs.market_activity.value} min_required={min_required}'
