@@ -87,3 +87,51 @@ def test_no_stale_ts_label_warnings(qapp):
     w = _ready_window()
     w._update_runtime_stats_from_ledger()
     assert not any('[GUI] stale label ignored key=ts_' in rec.message for rec in w.logger._records)
+
+
+def test_cleanup_disabled_old_inventory_ignored_by_runtime(qapp):
+    w = _ready_window()
+    w._cycle.open_position_qty = Decimal('0')
+    w._run_live_cycle()
+    assert all('[INV_SELL]' not in rec.message for rec in w.logger._records)
+    assert all('[INV] cleanup mode' not in rec.message for rec in w.logger._records)
+    assert any('[INV] ignored old inventory qty=' in rec.message for rec in w.logger._records)
+
+
+def test_inventory_risk_does_not_block_buy_when_cleanup_disabled(qapp):
+    w = _ready_window()
+    w._cycle.open_position_qty = Decimal('0')
+    w._run_live_cycle()
+    assert all('[EXIT] mode active risk=HEAVY' not in rec.message for rec in w.logger._records)
+
+
+def test_position_sell_qty_matches_open_position(qapp):
+    w = _ready_window()
+    w._trade_ledger.record_buy(Decimal('0.0123'), Decimal('1.1'))
+    w._cycle.open_position_qty = Decimal('0.0123')
+    w._run_live_cycle()
+    sell = next((o for o in w.orders.placed if o[0] == 'SELL'), None)
+    assert sell is not None
+    assert Decimal(str(sell[1])) == Decimal('0.01')
+
+
+def test_no_inventory_sell_logs_when_cleanup_disabled(qapp):
+    w = _ready_window()
+    w._trade_ledger.record_buy(Decimal('0.02'), Decimal('1.1'))
+    w._cycle.open_position_qty = Decimal('0.02')
+    w._run_live_cycle()
+    assert all('[INV_SELL]' not in rec.message for rec in w.logger._records)
+
+
+def test_cycle_repeats_after_matched_sell(qapp):
+    w = _ready_window()
+    w._trade_ledger.record_buy(Decimal('0.01'), Decimal('1.1'))
+    w._cycle.open_position_qty = Decimal('0.01')
+    w._cycle.buy_filled_qty = Decimal('0.01')
+    w._cycle.buy_avg_price = Decimal('1.1')
+    w._cycle.sell_order_id = 9
+    w._orders_by_id = {9: {'orderId': 9, 'origQty': '0.01', 'executedQty': '0.01', 'price': '1.1010', 'status': 'FILLED'}}
+    w._last_open_orders = []
+    w.orders.order_status = lambda _oid: {'status': 'FILLED', 'executedQty': '0.01', 'price': '1.1010'}
+    w._run_live_cycle()
+    assert any('[CYCLE] CLOSED' in rec.message and 'ready_for_next_buy' in rec.message for rec in w.logger._records)
