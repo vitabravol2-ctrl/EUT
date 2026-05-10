@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+from .binance_client import BinanceAPIError
+
 
 class OrderService:
     def __init__(self, client, symbol: str) -> None:
@@ -22,7 +24,13 @@ class OrderService:
 
     def cancel(self, order_id: int) -> dict:
         start = time.perf_counter()
-        resp = self.client.cancel_order(self.symbol, order_id)
+        try:
+            resp = self.client.cancel_order(self.symbol, order_id)
+        except BinanceAPIError as exc:
+            if exc.code == -2011:
+                resp = {'orderId': order_id, 'status': 'UNKNOWN'}
+            else:
+                raise
         resp['_reaction_ms'] = (time.perf_counter() - start) * 1000
         return resp
 
