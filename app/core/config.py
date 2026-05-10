@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     'entry_aggr_ticks': 0,
     'exit_aggr_ticks': 0,
     'emergency_loss_ticks': 50,
+    'stop_loss_ticks': 300,
     'max_aggr_spread_pct': 0.25,
 }
 
