@@ -20,6 +20,12 @@ class PairConfig:
     quote_refresh_interval_sec: float
     maker_fee_rate: float
     taker_fee_rate: float
+    ws_stale_ms: int
+    rest_validate_sec: int
+    max_ws_rest_drift_ticks: int
+    minimum_reprice_ticks: int
+    minimum_quote_lifetime_ms: int
+    max_reprice_per_sec: int
 
 
 PAIR_REGISTRY: dict[str, PairConfig] = {
@@ -36,6 +42,12 @@ PAIR_REGISTRY: dict[str, PairConfig] = {
         quote_refresh_interval_sec=1.50,
         maker_fee_rate=0.0,
         taker_fee_rate=0.0,
+        ws_stale_ms=5000,
+        rest_validate_sec=10,
+        max_ws_rest_drift_ticks=2,
+        minimum_reprice_ticks=1,
+        minimum_quote_lifetime_ms=3000,
+        max_reprice_per_sec=1,
     ),
     'BTCU': PairConfig(
         symbol='BTCU',
@@ -50,6 +62,12 @@ PAIR_REGISTRY: dict[str, PairConfig] = {
         quote_refresh_interval_sec=0.80,
         maker_fee_rate=0.0,
         taker_fee_rate=0.0,
+        ws_stale_ms=1500,
+        rest_validate_sec=3,
+        max_ws_rest_drift_ticks=3,
+        minimum_reprice_ticks=5,
+        minimum_quote_lifetime_ms=2000,
+        max_reprice_per_sec=2,
     ),
 }
 
@@ -87,6 +105,12 @@ def get_pair_config(symbol: str) -> PairConfig:
         quote_refresh_interval_sec=default.quote_refresh_interval_sec,
         maker_fee_rate=default.maker_fee_rate,
         taker_fee_rate=default.taker_fee_rate,
+        ws_stale_ms=default.ws_stale_ms,
+        rest_validate_sec=default.rest_validate_sec,
+        max_ws_rest_drift_ticks=default.max_ws_rest_drift_ticks,
+        minimum_reprice_ticks=default.minimum_reprice_ticks,
+        minimum_quote_lifetime_ms=default.minimum_quote_lifetime_ms,
+        max_reprice_per_sec=default.max_reprice_per_sec,
     )
 
 

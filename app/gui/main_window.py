@@ -388,8 +388,14 @@ class MainWindow(QMainWindow):
             self._trade_stats['inventory_sells_count'] += 1
             self._trade_stats['inventory_sells_qty'] += qty
             self._trade_stats['inventory_sells_quote'] += qty * price
-            self.logger.log('INFO', f'[TRADE] inventory_sell qty={qty:.8f} sell={price:.8f}')
+            self.logger.log('INFO', f'[INV_SELL] qty={qty:.8f} quote={(qty*price):.8f}')
             return
+        if remaining > 0:
+            self._trade_stats['inventory_sells_count'] += 1
+            self._trade_stats['inventory_sells_qty'] += remaining
+            self._trade_stats['inventory_sells_quote'] += remaining * price
+            self.logger.log('INFO', f'[TRADE] matched qty={matched_qty:.8f}')
+            self.logger.log('INFO', f'[INV_SELL] qty={remaining:.8f} quote={(remaining*price):.8f}')
         avg_buy = buy_notional / matched_qty
         gross = matched_qty * (price - avg_buy)
         buy_fee_quote = (matched_qty * avg_buy) * taker_fee_rate
