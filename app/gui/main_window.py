@@ -525,7 +525,9 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             orig = Decimal(str(o.get('origQty', '0') or '0')); exe = Decimal(str(o.get('executedQty', '0') or '0')); rem = max(Decimal('0'), orig-exe)
             ts = int(o.get('updateTime') or o.get('time') or 0); age_ms = str(max(0, int(time.time() * 1000) - ts)) if ts > 0 else '-'
             side = str(o.get('side', '-'))
-            top_status = 'TOP' if ((side == 'BUY' and self.cs_top_bid_status.text() == 'TOP') or (side == 'SELL' and self.cs_top_ask_status.text() == 'TOP')) else ('WATCH' if str(o.get('status', '')).upper() in ('NEW', 'PARTIALLY_FILLED') else 'IDLE')
+            bid_top = self._safe_label_text(self.cs_top_bid_status, '-')
+            ask_top = self._safe_label_text(self.cs_top_ask_status, '-')
+            top_status = 'TOP' if ((side == 'BUY' and bid_top == 'TOP') or (side == 'SELL' and ask_top == 'TOP')) else ('WATCH' if str(o.get('status', '')).upper() in ('NEW', 'PARTIALLY_FILLED') else 'IDLE')
             vals=[side,f"{Decimal(str(o.get('price', '0') or '0')):.8f}",f"{orig:.8f}",f"{exe:.8f}",f"{rem:.8f}",age_ms,top_status]
             for c,v in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(v)))
 
@@ -740,7 +742,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def _run_live_cycle(self):
         self.logger.log('INFO', '[RUNTIME] cycle enter')
         c = self._cycle
-        self._log_throttled('runtime_cycle_enter', f"[RUNTIME] cycle enter live={self._live_running} private={self._private_ok} data={self._data_mode} fill={self.fo_possible.text() if self.fo_possible else '-'} spread={self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'}", 3.0)
+        fill_state = self._safe_label_text(self.fo_possible, '-')
+        self._log_throttled('runtime_cycle_enter', f"[RUNTIME] cycle enter live={self._live_running} private={self._private_ok} data={self._data_mode} fill={fill_state} spread={self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'}", 3.0)
         if not self._live_running:
             self._log_throttled('live_wait_not_running', '[LIVE] waiting reason=harvest off', 7.0)
             return
@@ -1146,13 +1149,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self._status_badges['BALANCE'].setText(f"BALANCE {'✅' if bal_ok else '❌'}")
         market_ok = self._last_market_ts > 0 and not stale
         self._status_badges['MARKET'].setText(f"MARKET {'✅' if market_ok else '❌'}")
-        fill_ok = (self.fo_possible.text() == 'YES') if self.fo_possible else False
+        fill_ok = self._safe_label_text(self.fo_possible, 'NO') == 'YES'
         self._status_badges['FILL'].setText(f"FILL {'✅' if fill_ok else '❌'}")
         self._status_badges['CYCLE'].setText(f"CYCLE {self._cycle.state.value}")
         self._status_badges['ORDER'].setText(f"ORDER {'✅' if len(self._last_open_orders)>0 else '❌'}")
         self._status_badges['RISK'].setText(f"RISK {risk_label}")
-        self._status_balance_euri.setText(f"{self._pair_config.base_asset} {self._fmt_bal('BASE_free')} / locked {self._fmt_bal('BASE_locked')}")
-        self._status_balance_usdt.setText(f"{self._pair_config.quote_asset} {self._fmt_bal('QUOTE_free')} / locked {self._fmt_bal('QUOTE_locked')}")
+        self._set_label_text(self._status_balance_euri, f"{self._pair_config.base_asset} {self._fmt_bal('BASE_free')} / locked {self._fmt_bal('BASE_locked')}")
+        self._set_label_text(self._status_balance_usdt, f"{self._pair_config.quote_asset} {self._fmt_bal('QUOTE_free')} / locked {self._fmt_bal('QUOTE_locked')}")
+        self._log_throttled('balance_status_updated', f"[BALANCE] updated base={self._pair_config.base_asset} free={self._balances.get('BASE_free', 0)} locked={self._balances.get('BASE_locked', 0)} quote={self._pair_config.quote_asset} free={self._balances.get('QUOTE_free', 0)} locked={self._balances.get('QUOTE_locked', 0)}", 10.0)
 
     def _update_runtime_stats_panel(self):
         inv=self._inventory_metrics(); self.cs_inv_portfolio.setText(f"{inv['portfolio']:.2f}"); self.cs_inv_base_value.setText(f"{inv['base_value']:.2f}"); self.cs_inv_quote_value.setText(f"{inv['quote_value']:.2f}"); self.cs_inv_ratio.setText(f"{self._pair_config.base_asset} {inv['ratio']*100:.0f}% / {self._pair_config.quote_asset} {(Decimal('1')-inv['ratio'])*100:.0f}%"); self.cs_inv_drift.setText(inv['drift'])
@@ -1172,7 +1176,19 @@ QPushButton#btn_info:pressed { background: #184f9a; }
     def _set_label_text(self, label: QLabel | None, value: str):
         if label is None or not isValid(label):
             return
-        label.setText(value)
+        try:
+            label.setText(str(value))
+        except RuntimeError as e:
+            self.logger.log('ERROR', f'[ERROR] stale QLabel skipped: {e}')
+
+    def _safe_label_text(self, label: QLabel | None, fallback: str = '-') -> str:
+        if label is None or not isValid(label):
+            return fallback
+        try:
+            return label.text()
+        except RuntimeError as e:
+            self.logger.log('ERROR', f'[ERROR] stale QLabel skipped: {e}')
+            return fallback
 
     def _set_label_color(self, label: QLabel, color: str):
         if label is None or not isValid(label):
@@ -1182,17 +1198,19 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         self._set_label_color(self._status_badges['CONNECTED'], '#4caf50' if self._private_ok else '#f44336')
         spread_state = self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'
         self._set_label_color(self._status_badges['SPREAD'], '#4caf50' if spread_state == 'READY' else ('#fbc02d' if spread_state == 'WATCH' else '#f44336'))
-        data_state = self._status_badges['DATA'].text()
+        data_state = self._safe_label_text(self._status_badges.get('DATA'), 'DATA STALE')
         self._set_label_color(self._status_badges['DATA'], '#f44336' if data_state == 'DATA STALE' else ('#4caf50' if self._data_mode == 'WS' else '#fbc02d'))
         risk_ok, _ = self._risk_ok()
         self._set_label_color(self._status_badges['RISK'], '#4caf50' if risk_ok else '#f44336')
         self._set_label_color(self._status_badges['LIVE'], '#4caf50' if self._live_running else '#f44336')
-        self._set_label_color(self.cs_top_bid_status, {'TOP': '#4caf50', 'WORKING': '#fbc02d', 'REPRICING': '#ff9800', 'NO INVENTORY': '#9e9e9e', 'ERROR': '#f44336'}.get(self.cs_top_bid_status.text(), '#e6edf3'))
-        self._set_label_color(self.cs_top_ask_status, {'TOP': '#4caf50', 'WORKING': '#fbc02d', 'REPRICING': '#ff9800', 'NO INVENTORY': '#9e9e9e', 'ERROR': '#f44336'}.get(self.cs_top_ask_status.text(), '#e6edf3'))
+        top_bid_status = self._safe_label_text(self.cs_top_bid_status, '-')
+        self._set_label_color(self.cs_top_bid_status, {'TOP': '#4caf50', 'WORKING': '#fbc02d', 'REPRICING': '#ff9800', 'NO INVENTORY': '#9e9e9e', 'ERROR': '#f44336'}.get(top_bid_status, '#e6edf3'))
+        top_ask_status = self._safe_label_text(self.cs_top_ask_status, '-')
+        self._set_label_color(self.cs_top_ask_status, {'TOP': '#4caf50', 'WORKING': '#fbc02d', 'REPRICING': '#ff9800', 'NO INVENTORY': '#9e9e9e', 'ERROR': '#f44336'}.get(top_ask_status, '#e6edf3'))
         cycle_color = {'IDLE': '#9e9e9e', 'WAIT_READY': '#fbc02d', 'PLACE_BUY': '#42a5f5', 'BUY_WORKING': '#42a5f5', 'CANCEL_BUY': '#ff9800', 'BUY_FILLED': '#4caf50', 'PLACE_SELL': '#42a5f5', 'SELL_WORKING': '#42a5f5', 'CANCEL_SELL': '#ff9800', 'SELL_FILLED': '#4caf50', 'PROFIT_LOCKED': '#4caf50', 'EXIT_PENDING': '#ff9800', 'ERROR': '#f44336', 'STOPPED': '#9e9e9e'}.get(self._cycle.state.value, '#e6edf3')
         self._set_label_color(self.cs_state, cycle_color)
         self._set_label_color(self.ss_readiness, '#4caf50' if spread_state == 'READY' else ('#fbc02d' if spread_state == 'WATCH' else '#9e9e9e'))
-        fill_possible_text = self.fo_possible.text() if self.fo_possible is not None and isValid(self.fo_possible) else 'NO'
+        fill_possible_text = self._safe_label_text(self.fo_possible, 'NO')
         self._set_label_color(self.fo_possible, '#4caf50' if fill_possible_text == 'YES' else '#9e9e9e')
         inv=self._inventory_metrics(); self._set_label_color(self.cs_inv_drift, inv['color'])
     def _fmt_bal(self,k):
