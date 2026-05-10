@@ -19,7 +19,7 @@ class LogPanel(QWidget):
         self._collapsed = False
         self._compact_mode = True
         self._visible_limit = min(200, max_lines)
-        self._compact_tags = ('[BUY]', '[SELL]', '[TRADE]', '[PNL]', '[RISK]', '[ERROR]', '[DATA]', '[WS]')
+        self._compact_tags = ('[BUY]', '[SELL]', '[TRADE]', '[PNL]', '[RISK]', '[ERROR]', '[DATA]', '[WS]', '[BOOT]', '[FILTERS]', '[BALANCE]', '[ORDERS]', '[MARKET]')
         self._compact_excluded_fragments = (
             'capacity total',
             'routine repost',
