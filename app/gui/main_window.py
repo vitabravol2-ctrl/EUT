@@ -404,6 +404,37 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self._log_throttled('balance_live_refresh', f"[BALANCE] live refresh reason={reason} {self._pair_config.base_asset}_free={balances.get('BASE_free', 0)}", 45.0)
         return balances
 
+
+    def _is_would_take_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        code = getattr(exc, 'code', None)
+        return code == -2010 or 'would immediately match and take' in text
+
+    def _fresh_market_bid_ask(self) -> tuple[Decimal, Decimal]:
+        market = dict(self._last_market_snapshot or {})
+        ws_fresh = self._last_market_source == 'WS' and self.ws.status.state == 'OK' and (time.time() - self._last_market_ts) <= 1.5
+        if (not ws_fresh) or Decimal(str(market.get('bid', 0) or 0)) <= 0 or Decimal(str(market.get('ask', 0) or 0)) <= 0:
+            market = self.market.snapshot()
+            market['source'] = 'REST'
+            self._on_task_success('market', market)
+        bid = Decimal(str(market.get('bid', 0) or 0))
+        ask = Decimal(str(market.get('ask', 0) or 0))
+        return bid, ask
+
+    def _safe_maker_buy_price(self, bid: Decimal, ask: Decimal, tick: Decimal) -> Decimal:
+        price = floor_to_tick(bid, tick)
+        if price >= ask and tick > 0:
+            price = floor_to_tick(ask - tick, tick)
+        return price
+
+    def _safe_maker_sell_price(self, target_tp_price: Decimal, bid: Decimal, ask: Decimal, tick: Decimal) -> Decimal:
+        maker_sell_price = max(target_tp_price, ask)
+        if maker_sell_price <= bid and tick > 0:
+            maker_sell_price = bid + tick
+        sell_price = floor_to_tick(maker_sell_price, tick)
+        if sell_price <= bid and tick > 0:
+            sell_price = floor_to_tick(bid + tick, tick)
+        return sell_price
     def _cleanup_duplicate_side_orders(self) -> bool:
         changed = False
         side_map: dict[str, list[dict]] = {'BUY': [], 'SELL': []}
@@ -828,8 +859,27 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 if buy_allowed and not c.buy_order_id and not buy_grace_active and not self._pending_buy_order:
                     qty_n = floor_to_step(buy_quote / bid, step) if bid > 0 else Decimal('0')
                     if qty_n > 0:
-                        price = floor_to_tick(bid, tick)
-                        resp = self.orders.place_limit_maker('BUY', format_decimal_for_step(qty_n, step), format_decimal_for_tick(price, tick))
+                        bid_fresh, ask_fresh = self._fresh_market_bid_ask()
+                        price = self._safe_maker_buy_price(bid_fresh, ask_fresh, tick)
+                        try:
+                            resp = self.orders.place_limit_maker('BUY', format_decimal_for_step(qty_n, step), format_decimal_for_tick(price, tick))
+                        except Exception as e:
+                            if self._is_would_take_error(e):
+                                self.logger.log('INFO', f'[BUY] maker rejected would_take price={price} bid={bid_fresh} ask={ask_fresh}')
+                                bid_retry, ask_retry = self._fresh_market_bid_ask()
+                                retry_price = self._safe_maker_buy_price(bid_retry, ask_retry, tick)
+                                try:
+                                    resp = self.orders.place_limit_maker('BUY', format_decimal_for_step(qty_n, step), format_decimal_for_tick(retry_price, tick))
+                                except Exception as e2:
+                                    if self._is_would_take_error(e2):
+                                        self.logger.log('INFO', f'[BUY] maker rejected would_take price={retry_price} bid={bid_retry} ask={ask_retry}')
+                                        resp = None
+                                    else:
+                                        raise
+                            else:
+                                raise
+                        if not resp:
+                            return
                         c.buy_order_id = int(resp.get('orderId'))
                         c.buy_requested_qty = qty_n
                         c.target_qty = qty_n
@@ -1006,13 +1056,26 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self.logger.log('INFO', '[SELL] skipped: no free inventory after refresh')
                         elif sell_qty > 0:
                             min_exit = c.buy_avg_price + (Decimal(str(self.cfg.get('target_profit_ticks', 1))) * tick)
-                            price = floor_to_tick(max(ask, min_exit), tick)
+                            bid_fresh, ask_fresh = self._fresh_market_bid_ask()
+                            price = self._safe_maker_sell_price(min_exit, bid_fresh, ask_fresh, tick)
                             self.logger.log('INFO', '[EXIT] unload mode') if risk_state in ('HEAVY', 'DANGER') else None
                             self.logger.log('INFO', f'[SELL] TP protected qty={sell_qty} price={price}') if ask < min_exit else None
                             try:
                                 resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(price, tick))
                             except Exception as e:
-                                if 'insufficient' in str(e).lower() and 'balance' in str(e).lower():
+                                if self._is_would_take_error(e):
+                                    self.logger.log('INFO', f'[SELL] maker rejected would_take price={price} bid={bid_fresh} ask={ask_fresh}')
+                                    bid_retry, ask_retry = self._fresh_market_bid_ask()
+                                    retry_price = self._safe_maker_sell_price(min_exit, bid_retry, ask_retry, tick)
+                                    try:
+                                        resp = self.orders.place_limit_maker('SELL', format_decimal_for_step(sell_qty, step), format_decimal_for_tick(retry_price, tick))
+                                        price = retry_price
+                                    except Exception as e2:
+                                        if self._is_would_take_error(e2):
+                                            self.logger.log('INFO', f'[SELL] maker rejected would_take price={retry_price} bid={bid_retry} ask={ask_retry}')
+                                            return
+                                        raise
+                                elif 'insufficient' in str(e).lower() and 'balance' in str(e).lower():
                                     # GUI updates are timer-driven only (SELL branch).
                                     # GUI updates are timer-driven only (SELL branch).
                                     if c.sell_order_id and c.sell_order_id not in {int(o.get('orderId')) for o in self._last_open_orders if o.get('orderId')}:
