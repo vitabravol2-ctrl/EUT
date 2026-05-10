@@ -849,21 +849,23 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             return avg
         return Decimal(str(status_payload.get('price') or fallback_price or '0'))
 
-    def _finalize_closed_position(self, sell_order_id: int | None, reason: str = 'SELL_FILLED') -> None:
+    def _finalize_closed_position(self, reason: str, sell_order_id: int | None = None) -> None:
         c = self._cycle
-        if c.open_position_qty > Decimal('0'):
-            self.logger.log('INFO', f'[LEDGER] position closed qty_before={c.open_position_qty:.8f}')
-        c.open_position_qty = Decimal('0')
+        snap = self._trade_ledger.snapshot()
+        min_qty = Decimal(str(self._exchange_filters.get('minQty', '0') or '0'))
+        open_qty = floor_to_step(Decimal(str(snap.get('open_position_qty', Decimal('0')))), Decimal(str(self._exchange_filters.get('stepSize', '0.0001') or '0.0001')))
+        c.open_position_qty = Decimal('0') if open_qty <= min_qty else open_qty
+        c.buy_avg_price = Decimal(str(snap.get('avg_open_buy', Decimal('0')))) if c.open_position_qty > min_qty else Decimal('0')
         c.state = CycleState.WAIT_READY
         self._exit_buy_disabled_logged = False
         self._sl_pending_started_mono = 0.0
+        self._pending_exit_started_at = 0.0
+        self._exit_reason = ''
         self._clear_buy_runtime_order()
         self._clear_sell_runtime_order(sell_order_id)
         if sell_order_id and sell_order_id not in self._closed_event_sell_ids:
             self._closed_event_sell_ids.add(sell_order_id)
-            snap = self._trade_ledger.snapshot()
-            self.logger.log('INFO', f'[CYCLE] CLOSED pnl={snap.get("last_closed_trade_pnl", Decimal("0")):+.8f} -> FLAT ready_for_next_buy')
-        self.logger.log('INFO', f'[RECON] cycle flat finalized reason={reason}')
+        self.logger.log('INFO', f'[CYCLE] CLOSED reason={reason} -> FLAT ready_for_next_buy')
 
     def _mid_price_for_portfolio(self) -> Decimal:
         bid = Decimal(str(self._last_market_snapshot.get('bid', '0') if self._last_market_snapshot else '0'))
@@ -1455,7 +1457,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
             has_open_position = c.open_position_qty > min_qty_runtime
             position_mode = 'LONG_OPEN' if has_open_position else 'FLAT'
-            stop_loss_ticks = Decimal(str(self.cfg.get('stop_loss_ticks', 300) or 300))
+            stop_loss_ticks_cfg = Decimal(str(self.cfg.get('stop_loss_ticks', 300) or 300))
+            if str(self.cfg.get('symbol', '')).upper() == 'BTCU':
+                stop_loss_ticks = max(stop_loss_ticks_cfg, Decimal('1000'))
+            else:
+                stop_loss_ticks = stop_loss_ticks_cfg
             sl_price = c.buy_avg_price - (stop_loss_ticks * tick) if has_open_position else Decimal('0')
             sl_triggered = has_open_position and bid <= sl_price
             if (position_mode in ('LONG_OPEN', 'EXIT_SL')) and c.buy_order_id:
@@ -1535,7 +1541,8 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 self._on_sell_fill(delta, fill_price)
                                 min_qty = Decimal(str(filters.get('minQty', '0') or '0'))
                                 if c.open_position_qty <= min_qty:
-                                    self._finalize_closed_position(c.sell_order_id, 'SELL_DELTA_FILLED')
+                                    self._finalize_closed_position('SELL_DELTA_FILLED', sell_order_id=c.sell_order_id)
+                                    return
                                 # GUI updates are timer-driven only (SELL branch).
                                 self.logger.log('INFO', f'[INVENTORY] net={c.net_inventory_euri}')
                                 # GUI updates are timer-driven only (SELL branch).
@@ -1558,13 +1565,23 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self.logger.log('INFO', '[RUNTIME] optimistic cleared')
                     if should_clear_active_order(c.sell_order_id, sell_status, open_order_ids) and not sell_grace_active:
                         if sell_status == 'FILLED':
-                            self._finalize_closed_position(c.sell_order_id, 'SELL_FILLED_RECON')
+                            self._finalize_closed_position('SELL_FILLED_RECON', sell_order_id=c.sell_order_id)
+                            return
                         self.logger.log('INFO', f'[RECON] cleared stale SELL id={c.sell_order_id} status={sell_status or "UNKNOWN_ORDER"}')
                         self._clear_sell_runtime_order(c.sell_order_id)
                         if c.open_position_qty <= min_qty_runtime:
                             self.logger.log('INFO', '[INV] cleanup sell finished, harvest can continue')
                     qty_key = f"{c.open_position_qty:.8f}"
                     if sell_status == 'FILLED':
+                        self.logger.log('INFO', '[RECON] SELL FILLED handled; skip further SELL actions this tick')
+                        return
+                    ledger_open_qty = floor_to_step(max(Decimal('0'), position_qty), step)
+                    if position_mode == 'FLAT' and ledger_open_qty <= min_qty:
+                        c.sell_requested_qty = Decimal('0')
+                        self._log_throttled('block_sell_flat_no_position', '[BLOCK] sell reason=no_open_position', 5.0)
+                        if c.sell_order_id:
+                            self._clear_sell_runtime_order(c.sell_order_id)
+                        return
                         self._sell_filled_events_by_qty[qty_key] = self._sell_filled_events_by_qty.get(qty_key, 0) + 1
                         has_live_sell = any(str(o.get('side', '')).upper() == 'SELL' for o in self._last_open_orders)
                         if self._sell_filled_events_by_qty.get(qty_key, 0) >= 2 and c.open_position_qty > min_qty_runtime and not has_live_sell:
@@ -1652,8 +1669,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             self._set_exit_reason('TP_EXIT')
                         sell_cap = Decimal(str(self.cfg.get('max_sell_usdt_exposure', 10) or 10))
                         if has_open_position:
-                            sell_qty = self._compute_position_exit_sell_qty(position_qty, step)
-                            sell_qty = self._ensure_position_exit_invariant(sell_qty, position_qty, step)
+                            ledger_position_qty = floor_to_step(max(Decimal('0'), position_qty), step)
+                            if ledger_position_qty <= min_qty:
+                                self._log_throttled('block_sell_no_open_position', '[BLOCK] sell reason=no_open_position', 5.0)
+                                self._clear_sell_runtime_order(c.sell_order_id)
+                                return
+                            sell_qty = ledger_position_qty
                             mode = 'POSITION'
                         else:
                             sell_qty = min(exchange_free_euri, floor_to_step(sell_cap / ask, step) if ask > 0 else Decimal('0')) if enable_inventory_cleanup else Decimal('0')
