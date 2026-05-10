@@ -265,3 +265,21 @@ def test_flat_stale_sell_blocker_is_cleared_and_buy_continues(qapp):
     w._run_live_cycle()
     assert w._cycle.sell_order_id is None
     assert any(side == 'BUY' for side, _, _ in w.orders.placed)
+
+
+def test_flat_far_buy_is_cancelled_and_reposted_next_tick(qapp):
+    w = _ready_window()
+    w.cfg['buy_stale_reprice_ticks'] = 10
+    w._last_market_snapshot = {'bid': '1.1000', 'ask': '1.1002'}
+    w._cycle.buy_order_id = 77
+    w._last_open_orders = [{'orderId': 77, 'side': 'BUY', 'price': '1.0950', 'origQty': '10', 'executedQty': '0', 'status': 'NEW'}]
+    w._orders_by_id = {77: w._last_open_orders[0]}
+    cancelled = []
+    w.orders.cancel = lambda order_id: cancelled.append(order_id) or {'status': 'CANCELED'}
+    w._run_live_cycle()
+    assert cancelled == [77]
+    assert w._cycle.buy_order_id is None
+    assert all(side != 'BUY' for side, _, _ in w.orders.placed)
+    w._last_open_orders = []
+    w._run_live_cycle()
+    assert any(side == 'BUY' for side, _, _ in w.orders.placed)
