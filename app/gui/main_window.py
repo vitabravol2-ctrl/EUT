@@ -124,6 +124,23 @@ class MainWindow(QMainWindow):
         self.task_runner=TaskRunner(4,self); self.task_runner.signals.success.connect(self._on_task_success); self.task_runner.signals.error.connect(self._on_task_error); self.task_runner.signals.finished.connect(self.task_runner.finish)
         self.polling=PollingManager(self.refresh_market,self.refresh_orders,self.refresh_balances,300,500,3000,self)
         self._status_timer=QTimer(self); self._status_timer.timeout.connect(self._tick_status); self._status_timer.start(300); QTimer.singleShot(50,self._startup_connect_flow)
+
+
+    @property
+    def _runtime_active(self):
+        return self._live_running
+
+    @_runtime_active.setter
+    def _runtime_active(self, value):
+        self._live_running = bool(value)
+
+    @property
+    def _harvest_running(self):
+        return self._live_running
+
+    @_harvest_running.setter
+    def _harvest_running(self, value):
+        self._live_running = bool(value)
     def _init_services(self):
         self.client=BinanceClient(self.cfg['api_key'],self.cfg['api_secret'],self.cfg['testnet'],self.cfg.get('request_timeout_sec',3)); self.market=MarketService(self.client,self.cfg['symbol']); self.account=AccountService(self.client, self._pair_config.base_asset, self._pair_config.quote_asset); self.orders=OrderService(self.client,self.cfg['symbol'])
     def _build_ui(self):
@@ -855,6 +872,9 @@ class MainWindow(QMainWindow):
     def _tick_status(self):
         if not isValid(self):
             return
+        self._update_status_strip()
+        self._update_runtime_stats_panel()
+    def _update_status_strip(self):
         self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
         spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
         stale_timeout_ms = int(self.cfg.get('market_stale_ms', 3000) or 3000)
@@ -871,10 +891,14 @@ class MainWindow(QMainWindow):
         if self._data_mode != self._last_data_mode:
             self.logger.log('INFO', '[DATA] source=WS' if self._data_mode == 'WS' else '[DATA] source=REST')
             self._last_data_mode = self._data_mode
-        self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if self._live_running else 'HARVEST IDLE')
+        live_loop = self._live_running
+        self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if live_loop else 'HARVEST IDLE')
         self._status_badges['ORDERS'].setText(f'ORDERS {len(self._last_open_orders)}'); self._status_badges['RISK'].setText(f"RISK {'BLOCKED' if self.cfg.get('risk_guard_enabled') else 'OK'}")
         self._status_balance_euri.setText(f"{self._pair_config.base_asset} {self._fmt_bal('BASE_free')} / locked {self._fmt_bal('BASE_locked')}")
         self._status_balance_usdt.setText(f"{self._pair_config.quote_asset} {self._fmt_bal('QUOTE_free')} / locked {self._fmt_bal('QUOTE_locked')}")
+
+    def _update_runtime_stats_panel(self):
+        self._update_status_strip()
         inv=self._inventory_metrics(); self.cs_inv_portfolio.setText(f"{inv['portfolio']:.2f}"); self.cs_inv_base_value.setText(f"{inv['base_value']:.2f}"); self.cs_inv_quote_value.setText(f"{inv['quote_value']:.2f}"); self.cs_inv_ratio.setText(f"{self._pair_config.base_asset} {inv['ratio']*100:.0f}% / {self._pair_config.quote_asset} {(Decimal('1')-inv['ratio'])*100:.0f}%"); self.cs_inv_drift.setText(inv['drift'])
         sig=(f"{inv['ratio']*100:.0f}",inv['drift'])
         if sig!=self._last_inventory_log_signature:
