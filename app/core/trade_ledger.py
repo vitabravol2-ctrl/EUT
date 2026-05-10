@@ -35,7 +35,7 @@ class TradeLedger:
         self.sell_fills = 0
         self.last_fill = FillEvent('NONE', Decimal('0'), Decimal('0'), Decimal('0'), 0.0)
 
-    def on_buy(self, qty: Decimal, price: Decimal, timestamp: float | None = None) -> dict[str, Any]:
+    def record_buy(self, qty: Decimal, price: Decimal, fee: Decimal = Decimal('0'), timestamp: float | None = None) -> dict[str, Any]:
         ts = time.time() if timestamp is None else timestamp
         quote = qty * price
         self.buy_lots.append({'qty': qty, 'price': price, 'quote': quote, 'timestamp': ts})
@@ -45,7 +45,7 @@ class TradeLedger:
         self.last_fill = FillEvent('BUY', qty, price, quote, ts)
         return {'quote': quote, 'open_lots': len(self.buy_lots)}
 
-    def on_sell(self, qty: Decimal, price: Decimal, fee_rate: Decimal, tick_size: Decimal, timestamp: float | None = None) -> dict[str, Any]:
+    def record_sell(self, qty: Decimal, price: Decimal, fee: Decimal = Decimal('0'), tick_size: Decimal = Decimal('0'), timestamp: float | None = None) -> dict[str, Any]:
         ts = time.time() if timestamp is None else timestamp
         quote = qty * price
         self.total_sell_qty += qty
@@ -68,7 +68,7 @@ class TradeLedger:
         if matched_qty > 0:
             avg_buy = buy_notional / matched_qty
             gross = matched_qty * (price - avg_buy)
-            fees = ((matched_qty * avg_buy) + (matched_qty * price)) * fee_rate
+            fees = ((matched_qty * avg_buy) + (matched_qty * price)) * fee
             realized = gross - fees
             ticks = ((price - avg_buy) / tick_size) if tick_size > 0 else Decimal('0')
             self.matched_sell_qty += matched_qty
@@ -116,3 +116,10 @@ class TradeLedger:
             'total_fills': self.buy_fills + self.sell_fills,
             'last_fill': self.last_fill,
         }
+
+    # backward-compatible aliases
+    def on_buy(self, qty: Decimal, price: Decimal, timestamp: float | None = None) -> dict[str, Any]:
+        return self.record_buy(qty, price, fee=Decimal('0'), timestamp=timestamp)
+
+    def on_sell(self, qty: Decimal, price: Decimal, fee_rate: Decimal, tick_size: Decimal, timestamp: float | None = None) -> dict[str, Any]:
+        return self.record_sell(qty, price, fee=fee_rate, tick_size=tick_size, timestamp=timestamp)
