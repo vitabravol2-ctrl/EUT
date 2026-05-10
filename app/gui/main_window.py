@@ -872,8 +872,17 @@ class MainWindow(QMainWindow):
     def _tick_status(self):
         if not isValid(self):
             return
-        self._update_status_strip()
-        self._update_runtime_stats_panel()
+        try:
+            self._update_status_strip()
+            self._update_runtime_stats_panel()
+        except RuntimeError as exc:
+            # Qt can fire one last timer tick while widgets are being torn down.
+            # Stop the periodic callback to avoid noisy "C++ object already deleted" traces.
+            if 'already deleted' in str(exc):
+                if hasattr(self, '_status_timer') and self._status_timer:
+                    self._status_timer.stop()
+                return
+            raise
     def _update_status_strip(self):
         self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
         spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
