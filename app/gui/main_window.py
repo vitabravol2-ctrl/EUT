@@ -189,10 +189,15 @@ class MainWindow(QMainWindow):
         self.fo_bid=QLabel('-'); self.fo_ask=QLabel('-'); self.fo_window=QLabel('-'); self.fo_activity=QLabel('-'); self.fo_possible=QLabel('NO')
         for n,w in [('Fill: bid lifetime',self.fo_bid),('Fill: ask lifetime',self.fo_ask),('Fill: window',self.fo_window),('Fill: market activity',self.fo_activity),('Fill: possible',self.fo_possible)]: sl.addRow(n,w)
         right=QGroupBox('Actions'); rl=QVBoxLayout(right)
-        for t,f in [('Manual Order',self.open_manual_order),('Cancel Selected',self.cancel_selected),('Cancel All',self.cancel_all),('All Data',self.open_all_data),('Settings',self.open_settings)]: rl.addWidget(self._btn(t,f))
-        right_buttons = right.findChildren(QPushButton)
-        self.start_harvest_btn=self.start_button; self.stop_harvest_btn=self.stop_button; self.cancel_selected_btn=right_buttons[1]; self.cancel_all_btn=right_buttons[2]
-        self.manual_order_btn=right_buttons[0]; self.all_data_btn=right_buttons[3]; self.settings_btn=right_buttons[4]
+        self.manual_order_button = self._btn('Manual Order', self.open_manual_order)
+        self.cancel_selected_button = self._btn('Cancel Selected', self.cancel_selected)
+        self.cancel_all_button = self._btn('Cancel All', self.cancel_all)
+        self.all_data_button = self._btn('All Data', self.show_all_data)
+        self.settings_button = self._btn('Settings', self.open_settings)
+        for button in [self.manual_order_button, self.cancel_selected_button, self.cancel_all_button, self.all_data_button, self.settings_button]:
+            rl.addWidget(button)
+        self.start_harvest_btn=self.start_button; self.stop_harvest_btn=self.stop_button; self.cancel_selected_btn=self.cancel_selected_button; self.cancel_all_btn=self.cancel_all_button
+        self.manual_order_btn=self.manual_order_button; self.all_data_btn=self.all_data_button; self.settings_btn=self.settings_button
         self.start_harvest_btn.setObjectName('btn_start'); self.stop_harvest_btn.setObjectName('btn_stop'); self.cancel_selected_btn.setObjectName('btn_cancel')
         self.cancel_all_btn.setObjectName('btn_cancel'); self.all_data_btn.setObjectName('btn_info'); self.settings_btn.setObjectName('btn_info')
         self.setStyleSheet(self.styleSheet() + """
@@ -211,7 +216,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 """)
         split.addWidget(left); split.addWidget(center); split.addWidget(cycle); split.addWidget(right); split.setStretchFactor(1, 3); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
-        self.logger.log('INFO', '[GUI] start button wired')
+        self.logger.log('INFO', '[GUI] action wired START')
+        self.logger.log('INFO', '[GUI] action wired STOP')
+        self.logger.log('INFO', '[GUI] action wired MANUAL')
+        self.logger.log('INFO', '[GUI] action wired CANCEL_SELECTED')
+        self.logger.log('INFO', '[GUI] action wired CANCEL_ALL')
+        self.logger.log('INFO', '[GUI] action wired ALL_DATA')
+        self.logger.log('INFO', '[GUI] action wired SETTINGS')
+        self.logger.log('INFO', '[GUI] action wired EDIT_SETTINGS')
 
     def closeEvent(self, event):
         self._live_running = False
@@ -273,10 +285,28 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def _bootstrap_open_orders_refresh(self):
         self._on_task_success('orders', self.orders.open_orders())
-    def open_settings(self): self.settings_dialog=SettingsDialog(self.cfg,self.apply_settings,self.test_connection,self); self.settings_dialog.show()
-    def open_trade_settings(self): self.trade_settings_dialog=TradeSettingsDialog(self.cfg,self.apply_trade_settings,self); self.trade_settings_dialog.show()
-    def open_manual_order(self): self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
-    def open_all_data(self): self.all_data_dialog=AllDataDialog(self,self); self.all_data_dialog.show()
+    def open_settings(self):
+        try:
+            self.settings_dialog=SettingsDialog(self.cfg,self.apply_settings,self.test_connection,self); self.settings_dialog.show()
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=SETTINGS error={e}')
+    def open_trade_settings(self):
+        try:
+            self.trade_settings_dialog=TradeSettingsDialog(self.cfg,self.apply_trade_settings,self); self.trade_settings_dialog.show()
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=EDIT_SETTINGS error={e}')
+    def open_manual_order(self):
+        try:
+            self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=MANUAL error={e}')
+    def show_all_data(self):
+        try:
+            self.logger.log('INFO', '[GUI] All Data clicked')
+            self.all_data_dialog=AllDataDialog(self,self); self.all_data_dialog.show()
+            self.logger.log('INFO', '[GUI] All Data opened')
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] All Data failed: {e}')
     def apply_settings(self,v): self.cfg.update(v); save_config(self.cfg)
     def _build_fill_observer(self):
         fill_window_ms = int(self.cfg.get('fill_window_ms', self.cfg.get('min_stable_ms', 3000)))
@@ -587,64 +617,62 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         return f'[FILL] not possible reason={reason} bid={bid} ask={ask} spread_ticks={spread_ticks:.2f} bid_lifetime_ms={obs.bid_lifetime_ms} ask_lifetime_ms={obs.ask_lifetime_ms} market_activity={obs.market_activity.value} min_required={min_required}'
 
     def start_harvest(self):
-        self.logger.log('INFO', '[GUI] START clicked')
-        self.logger.log('INFO', f'[GUI] button object={id(self.start_harvest_btn)} enabled={self.start_harvest_btn.isEnabled()} visible={self.start_harvest_btn.isVisible()}')
-        self.logger.log('INFO', '[LIVE] start clicked')
-        if not self._private_ok:
-            self.logger.log('RISK', '[RISK] blocked: not connected')
-            return
-        if self._live_running:
-            self.logger.log('INFO', '[LIVE] start ignored: already running')
-            return
-        if self._cycle.state == CycleState.ERROR:
-            self._cycle = HarvestCycle()
-            old, new = self._cycle.transition(CycleState.WAIT_READY, 'start reset from error')
-            self._start_live_runtime()
-            self.logger.log('FSM', f'{CycleState.ERROR.value} -> {CycleState.RESET.value} reason=start reset')
-            self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
-            return
-        if not self._live_confirmed:
-            answer = QMessageBox.question(self, 'LIVE Confirmation', 'Start LIVE harvest with real Binance orders?\nSmall test mode only.')
-            if answer != QMessageBox.Yes:
+        try:
+            self.logger.log('INFO', '[GUI] START clicked')
+            self.logger.log('INFO', f'[GUI] private_ok={self._private_ok} live={self._live_running}')
+            if not self._private_ok:
+                self.logger.log('RISK', '[RISK] blocked: not connected')
+                return
+            result = QMessageBox.question(self, 'LIVE Confirmation', 'Start LIVE harvest with real Binance orders?\nSmall test mode only.', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            self.logger.log('INFO', f'[GUI] confirmation result={result}')
+            if result != QMessageBox.Yes:
                 self.logger.log('INFO', '[GUI] confirmation no')
-                self.logger.log('INFO', '[LIVE] start cancelled')
                 return
             self.logger.log('INFO', '[GUI] confirmation yes')
-            self._live_confirmed = True
-        old, new = self._start_live_runtime()
-        self.logger.log('FSM', f'{old.value} -> {new.value} reason=start requested')
+            self._start_live_runtime()
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=START error={e}')
 
     def _start_live_runtime(self):
-        self._live_running = True
-        self._runtime_active = True
-        self._cycle_started_at = time.time()
-        old, new = self._cycle.transition(CycleState.WAIT_READY, 'start requested')
-        self.logger.log('INFO', '[LIVE] runtime started')
-        return old, new
+        try:
+            self.logger.log('INFO', '[LIVE] _start_live_runtime enter')
+            self._live_running = True
+            self._runtime_active = True
+            self._cycle_started_at = time.time()
+            old, new = self._cycle.transition(CycleState.WAIT_READY, 'start requested')
+            self.logger.log('FSM', f'{old.value} -> {new.value} reason=transition WAIT_READY')
+            self.logger.log('INFO', '[LIVE] runtime started')
+            return old, new
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] start runtime failed: {e}')
+            raise
 
     def stop_harvest(self):
-        self._live_running = False
-        self.logger.log('INFO', '[LIVE] stopped')
-        if self._cycle.state == CycleState.ERROR:
-            old, new = self._cycle.transition(CycleState.STOPPED, 'stop from error')
-            self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop from error')
-            return
-        if self._cycle.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and self._cycle.buy_order_id:
-            try:
-                self.orders.cancel(self._cycle.buy_order_id)
-                self.logger.log('INFO', '[BUY] cancelled by STOP')
-            except Exception as e:
-                self.logger.log('ERROR', f'[BUY] cancel failed reason={e}')
-            old, new = self._cycle.transition(CycleState.STOPPED, 'stop after buy')
-            self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop after buy')
-        elif self._cycle.open_position_qty > 0:
-            old, new = self._cycle.transition(CycleState.EXIT_PENDING, 'stop with position')
-            self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop with position')
-        else:
-            if self._cycle.state == CycleState.IDLE:
-                self.logger.log('INFO', '[LIVE] already idle')
-            old, new = self._cycle.transition(CycleState.STOPPED, 'stop idle')
-            self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop idle')
+        try:
+            self._live_running = False
+            self.logger.log('INFO', '[LIVE] stopped')
+            if self._cycle.state == CycleState.ERROR:
+                old, new = self._cycle.transition(CycleState.STOPPED, 'stop from error')
+                self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop from error')
+                return
+            if self._cycle.state in (CycleState.BUY_WORKING, CycleState.BUY_PARTIAL) and self._cycle.buy_order_id:
+                try:
+                    self.orders.cancel(self._cycle.buy_order_id)
+                    self.logger.log('INFO', '[BUY] cancelled by STOP')
+                except Exception as e:
+                    self.logger.log('ERROR', f'[BUY] cancel failed reason={e}')
+                old, new = self._cycle.transition(CycleState.STOPPED, 'stop after buy')
+                self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop after buy')
+            elif self._cycle.open_position_qty > 0:
+                old, new = self._cycle.transition(CycleState.EXIT_PENDING, 'stop with position')
+                self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop with position')
+            else:
+                if self._cycle.state == CycleState.IDLE:
+                    self.logger.log('INFO', '[LIVE] already idle')
+                old, new = self._cycle.transition(CycleState.STOPPED, 'stop idle')
+                self.logger.log('FSM', f'{old.value} -> {new.value} reason=stop idle')
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=STOP error={e}')
 
     def _run_live_cycle(self):
         c = self._cycle
@@ -1165,12 +1193,18 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         except Exception as e:
             self.logger.log('ERROR', f'[ORDER] rejected reason={e}')
     def cancel_selected(self):
-        if not self._selected_order_id: self.logger.log('RISK','[RISK] blocked: no order selected'); return
-        try: self.orders.cancel(self._selected_order_id); self.logger.log('INFO',f'cancelled id={self._selected_order_id}'); self.refresh_orders(True)
-        except Exception as e: self.logger.log('ERROR',f'cancel selected failed: {e}')
+        try:
+            if not self._selected_order_id: self.logger.log('RISK','[RISK] blocked: no order selected'); return
+            try: self.orders.cancel(self._selected_order_id); self.logger.log('INFO',f'cancelled id={self._selected_order_id}'); self.refresh_orders(True)
+            except Exception as e: self.logger.log('ERROR',f'cancel selected failed: {e}')
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=CANCEL_SELECTED error={e}')
     def cancel_all(self):
-        try: self.orders.cancel_all(); self.logger.log('INFO','cancel all requested'); self.refresh_orders(True)
-        except Exception as e: self.logger.log('ERROR',f'cancel all failed: {e}')
+        try:
+            try: self.orders.cancel_all(); self.logger.log('INFO','cancel all requested'); self.refresh_orders(True)
+            except Exception as e: self.logger.log('ERROR',f'cancel all failed: {e}')
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] GUI action failed action=CANCEL_ALL error={e}')
     def start_polling(self):
         self.polling.set_private_enabled(True)
         self.polling.start()
