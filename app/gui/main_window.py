@@ -4,7 +4,7 @@ import sys
 from decimal import Decimal
 import time
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSignalBlocker
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTextEdit
 from shiboken6 import isValid
@@ -173,7 +173,8 @@ class MainWindow(QMainWindow):
         self.pair_selector = QComboBox(); self.pair_selector.addItems(list_pairs()); self.pair_selector.currentTextChanged.connect(self._on_pair_selected)
         for n,w in [('PAIR',self.pair_selector),('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Pair profile',self.ts_pair_profile),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         self.start_button = QPushButton('HARVEST OFF')
-        self.start_button.clicked.connect(self.toggle_harvest)
+        self.start_button.setCheckable(True)
+        self.start_button.toggled.connect(self.toggle_harvest)
         self.stop_button = self.start_button
         self.edit_settings_button = self._btn('Edit Settings', self.open_trade_settings)
         fl.addRow(self.start_button); fl.addRow(self.edit_settings_button)
@@ -480,14 +481,16 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self.logger.log('INFO', f"[FILL] slow_market={'YES' if slow_market else 'NO'}")
                 self._last_slow_market = slow_market
             if metrics.state.readiness != self._last_spread_readiness:
-                self.logger.log('INFO', f"[SPREAD] {metrics.state.readiness.value} spread={metrics.snapshot.spread_ticks:.2f} lifetime={metrics.state.spread_lifetime_ms}ms")
+                self.logger.log('INFO', f"[SPREAD] {metrics.state.readiness.value} ticks={metrics.snapshot.spread_ticks:.2f} lifetime={metrics.state.spread_lifetime_ms}ms")
                 self._last_spread_readiness=metrics.state.readiness
             if self._cycle.state == CycleState.IDLE:
                 old, new = self._cycle.transition(CycleState.WAIT_READY, 'boot')
                 self.logger.log('FSM', f'{old.value} -> {new.value} reason=boot')
             if metrics.state.spread_collapse_count > 0 and metrics.state.readiness == ReadinessState.NOT_READY:
                 self.logger.log('INFO', '[SPREAD] COLLAPSE')
-        elif name=='balances': self._balances=payload; self._private_ok=True
+        elif name=='balances':
+            self._balances=payload; self._private_ok=True
+            self._update_status_strip()
         elif name=='orders': self._sync_open_orders(payload)
     def _on_task_error(self,name,err):
         self.logger.log('ERROR', f'{name}: {err}');
@@ -628,6 +631,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         reason = ', '.join(reasons) if reasons else 'unknown'
         return f'[FILL] not possible reason={reason} bid={bid} ask={ask} spread_ticks={spread_ticks:.2f} bid_lifetime_ms={obs.bid_lifetime_ms} ask_lifetime_ms={obs.ask_lifetime_ms} market_activity={obs.market_activity.value} min_required={min_required}'
 
+    def _set_harvest_button_checked(self, checked: bool):
+        blocker = QSignalBlocker(self.start_button)
+        self.start_button.setChecked(bool(checked))
+        del blocker
+
     def _update_harvest_button(self):
         state = 'OFF'
         color = '#9e9e9e'
@@ -642,12 +650,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             color = '#fbc02d'
         self.start_button.setText(f'HARVEST {state}')
         self.start_button.setStyleSheet(f'background: {color}; font-weight: 700;')
+        self._set_harvest_button_checked(self._live_running)
 
-    def toggle_harvest(self):
-        if self._live_running:
-            self.stop_harvest()
-        else:
+    def toggle_harvest(self, checked: bool):
+        if checked:
             self.start_harvest()
+        else:
+            self.stop_harvest()
 
     def start_harvest(self):
         try:
@@ -656,11 +665,13 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             debug_force = bool(globals().get("DEBUG_FORCE_START", False))
             if not self._private_ok and not debug_force:
                 self.logger.log('RISK', '[RISK] blocked: not connected')
+                self._set_harvest_button_checked(False)
                 return
             if debug_force:
                 self.logger.log('INFO', '[GUI] DEBUG_FORCE_START direct runtime call')
             self._start_live_runtime()
         except Exception as e:
+            self._set_harvest_button_checked(False)
             self.logger.log('ERROR', f'[ERROR] GUI action failed action=HARVEST_ON error={e}')
 
     def _start_live_runtime(self):
@@ -719,9 +730,15 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         if now - self._last_live_tick_log_at >= 3.0:
             self.logger.log('INFO', '[LIVE] tick calling run_live_cycle')
             self._last_live_tick_log_at = now
-        self._run_live_cycle()
+        self.logger.log('INFO', '[LIVE] tick before run_live_cycle')
+        try:
+            self._run_live_cycle()
+        except Exception as e:
+            self.logger.log('ERROR', f'[ERROR] live cycle failed: {e}')
+        self.logger.log('INFO', '[LIVE] tick after run_live_cycle')
 
     def _run_live_cycle(self):
+        self.logger.log('INFO', '[RUNTIME] cycle enter')
         c = self._cycle
         self._log_throttled('runtime_cycle_enter', f"[RUNTIME] cycle enter live={self._live_running} private={self._private_ok} data={self._data_mode} fill={self.fo_possible.text() if self.fo_possible else '-'} spread={self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'}", 3.0)
         if not self._live_running:
