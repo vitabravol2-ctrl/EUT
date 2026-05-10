@@ -6,7 +6,7 @@ import time
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QTextEdit
 
 from app.core.account_service import AccountService
 from app.core.fill_observer import FillObserver, MarketActivity
@@ -71,13 +71,21 @@ class ManualOrderDialog(QDialog):
 
 class AllDataDialog(QDialog):
     def __init__(self, main, parent=None):
-        super().__init__(parent); self.setWindowTitle('All Data'); l=QVBoxLayout(self)
-        for g in ['Account','Market','Harvest','Execution','Runtime','Filters']:
-            box=QGroupBox(g); bl=QVBoxLayout(box); bl.addWidget(QLabel(main._all_data_text(g))); l.addWidget(box)
+        super().__init__(parent); self.setWindowTitle('All Data Diagnostics'); l=QVBoxLayout(self)
+        tabs = QTabWidget(self)
+        for g in ['Account', 'Market', 'Runtime', 'Orders', 'Filters', 'Execution']:
+            tab = QWidget()
+            tab_l = QVBoxLayout(tab)
+            view = QTextEdit()
+            view.setReadOnly(True)
+            view.setText(main._all_data_text(g))
+            tab_l.addWidget(view)
+            tabs.addTab(tab, g)
+        l.addWidget(tabs)
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__(); self.setWindowTitle('EUT v0.3.7 — GUI Stabilization'); self.setMinimumSize(1200,700); self.setStyleSheet(DARK_STYLESHEET); self.setFont(QFont('', APP_FONT_PT))
+        super().__init__(); self.setWindowTitle('EUT v0.3.8 — Operator Terminal'); self.setMinimumSize(1280,760); self.setStyleSheet(DARK_STYLESHEET); self.setFont(QFont('', APP_FONT_PT))
         self.logger=AppLogger(max_records=500,dedupe_seconds=30); self.cfg=load_config(); self.runtime=RuntimeState(); self.ws=WSManager(enabled=False)
         self._last_market_snapshot={}; self._last_open_orders=[]; self._balances={}; self._status_badges={}; self._orders_by_id={}; self._selected_order_id=None; self._exchange_filters={}
         self._spread_analyzer=SpreadStabilityAnalyzer(); self._queue_estimator=QueueQualityEstimator(); self._harvest_engine=HarvestReadinessEngine(); self._private_ok=False
@@ -104,16 +112,16 @@ class MainWindow(QMainWindow):
         self.client=BinanceClient(self.cfg['api_key'],self.cfg['api_secret'],self.cfg['testnet'],self.cfg.get('request_timeout_sec',3)); self.market=MarketService(self.client,self.cfg['symbol']); self.account=AccountService(self.client); self.orders=OrderService(self.client,self.cfg['symbol'])
     def _build_ui(self):
         root=QWidget(); self.setCentralWidget(root); main=QVBoxLayout(root); top=QGroupBox('Status Strip'); l=QHBoxLayout(top)
-        for k in ['SYSTEM','TRADING','EURI','USDT','SPREAD','HARVEST','ORDERS','RISK']:
+        for k in ['CONNECTED','SPREAD','HARVEST','ORDERS','RISK']:
             b=QLabel(f'{k} -'); self._status_badges[k]=b; l.addWidget(b)
         main.addWidget(top)
         split=QSplitter(Qt.Horizontal)
         left=QGroupBox('Trade / Harvest Settings'); fl=QFormLayout(left); self.ts_symbol=QLabel(); self.ts_mode=QLabel('LIVE TRADE'); self.ts_buy_exp=QLabel(); self.ts_sell_exp=QLabel(); self.ts_min=QLabel(); self.ts_profit=QLabel(); self.ts_stable=QLabel(); self.ts_partial=QLabel(); self.ts_min_partial=QLabel(); self.ts_reprice=QLabel(); self.ts_collapse=QLabel(); self.ts_cycle_age=QLabel(); self.ts_risk=QLabel()
         for n,w in [('Mode',self.ts_mode),('Symbol',self.ts_symbol),('Max BUY exposure USDT',self.ts_buy_exp),('Max SELL exposure USDT',self.ts_sell_exp),('Min spread ticks',self.ts_min),('Target profit ticks',self.ts_profit),('Min stable ms',self.ts_stable),('Allow partial fills',self.ts_partial),('Min partial fill EURI',self.ts_min_partial),('Reprice on bid/ask move',self.ts_reprice),('Cancel on spread collapse',self.ts_collapse),('Risk guard',self.ts_risk)]: fl.addRow(n,w)
         fl.addRow(self._btn('START HARVEST', self.start_harvest)); fl.addRow(self._btn('STOP HARVEST', self.stop_harvest)); fl.addRow(self._btn('Edit Settings', self.open_trade_settings))
-        cycle=QGroupBox('Harvest Runtime State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
-        for n,w in [('ENGINE',self.cs_state),('BUY quote',self.cs_buy_working),('SELL quote',self.cs_sell_working),('BUY status',self.cs_buy_status),('SELL status',self.cs_sell_status),('BUY top',self.cs_top_bid_status),('SELL top',self.cs_top_ask_status),('BUY exposure',self.cs_avail_buy_usdt),('SELL exposure',self.cs_avail_sell_qty),('Inventory',self.cs_open),('PnL',self.cs_pnl),('Spread state',self.ss_readiness),('BUY order id',self.cs_buy_order_id),('SELL order id',self.cs_sell_order_id),('Last fill time',self.cs_last_fill)]: cf.addRow(n,w)
-        center=QGroupBox('Open Orders'); cl=QVBoxLayout(center); self.table=QTableWidget(0,8); self.table.setHorizontalHeaderLabels(['orderId','side','price','origQty','executedQty','remainingQty','status','age ms']); self.table.itemSelectionChanged.connect(self._on_order_selected); self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive); cl.addWidget(self.table); self.no_orders=QLabel('No open orders'); cl.addWidget(self.no_orders)
+        cycle=QGroupBox('Runtime State'); cf=QFormLayout(cycle); self.cs_state=QLabel(); self.cs_target=QLabel(); self.cs_bought=QLabel(); self.cs_sold=QLabel(); self.cs_open=QLabel(); self.cs_avg_buy=QLabel(); self.cs_avg_sell=QLabel(); self.cs_pnl=QLabel(); self.cs_order=QLabel(); self.cs_reason=QLabel(); self.cs_buy_working=QLabel(); self.cs_sell_working=QLabel(); self.cs_buy_remaining=QLabel(); self.cs_sell_remaining=QLabel(); self.cs_cycle_age=QLabel(); self.cs_last_fill=QLabel('-'); self.cs_buy_order_id=QLabel('-'); self.cs_sell_order_id=QLabel('-'); self.cs_buy_status=QLabel('-'); self.cs_sell_status=QLabel('-'); self.cs_top_bid_status=QLabel('-'); self.cs_top_ask_status=QLabel('-'); self.cs_buy_age=QLabel('-'); self.cs_sell_age=QLabel('-'); self.cs_avail_sell_qty=QLabel('-'); self.cs_pending_sell_qty=QLabel('-'); self.cs_avail_buy_usdt=QLabel('-'); self.cs_inv_exposure=QLabel('-'); self.ss_readiness=QLabel('NOT_READY')
+        for n,w in [('ENGINE',self.cs_state),('BUY STATE',self.cs_buy_status),('SELL STATE',self.cs_sell_status),('BUY TOP',self.cs_top_bid_status),('SELL TOP',self.cs_top_ask_status),('BUY EXPOSURE',self.cs_avail_buy_usdt),('SELL EXPOSURE',self.cs_avail_sell_qty),('LAST FILL',self.cs_last_fill),('PnL',self.cs_pnl)]: cf.addRow(n,w)
+        center=QGroupBox('Open Orders'); cl=QVBoxLayout(center); self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(['side','price','qty','filled','remain','age','top-status']); self.table.itemSelectionChanged.connect(self._on_order_selected); self.table.verticalHeader().setVisible(False); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); cl.addWidget(self.table); self.no_orders=QLabel('No open orders'); cl.addWidget(self.no_orders)
         spread_box=QGroupBox('Spread Stability'); sl=QFormLayout(spread_box)
         self.ss_ticks=QLabel('-'); self.ss_lifetime=QLabel('-'); self.ss_bid=QLabel('-'); self.ss_ask=QLabel('-'); self.ss_ratio=QLabel('-'); self.ss_collapse=QLabel('0')
         for n,w in [('Spread ticks',self.ss_ticks),('Spread lifetime',self.ss_lifetime),('Bid stable',self.ss_bid),('Ask stable',self.ss_ask),('Stable ratio',self.ss_ratio),('Collapse count',self.ss_collapse),('Readiness',self.ss_readiness)]: sl.addRow(n,w)
@@ -123,7 +131,7 @@ class MainWindow(QMainWindow):
         for t,f in [('Manual Order',self.open_manual_order),('Cancel Selected',self.cancel_selected),('Cancel All',self.cancel_all),('All Data',self.open_all_data),('Settings',self.open_settings)]: rl.addWidget(self._btn(t,f))
         left_buttons = left.findChildren(QPushButton)
         self.start_harvest_btn=left_buttons[0]; self.stop_harvest_btn=left_buttons[1]; self.cancel_selected_btn=right.findChildren(QPushButton)[1]; self.cancel_all_btn=right.findChildren(QPushButton)[2]
-        split.addWidget(left); split.addWidget(cycle); split.addWidget(center); split.addWidget(spread_box); split.addWidget(right); main.addWidget(split)
+        split.addWidget(left); split.addWidget(cycle); split.addWidget(center); split.addWidget(spread_box); split.addWidget(right); split.setStretchFactor(2, 3); main.addWidget(split)
         logs=QGroupBox('Logs'); ll=QVBoxLayout(logs); self.log_panel=LogPanel(500); self.logger.subscribe(self.log_panel.append_record); ll.addWidget(self.log_panel); main.addWidget(logs)
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
     def _startup_connect_flow(self): self._load_exchange_filters(); self.refresh_market(True); self.refresh_balances(True); self.refresh_orders(True); self.start_polling()
@@ -272,7 +280,9 @@ class MainWindow(QMainWindow):
         for r,o in enumerate(rows):
             orig = Decimal(str(o.get('origQty', '0') or '0')); exe = Decimal(str(o.get('executedQty', '0') or '0')); rem = max(Decimal('0'), orig-exe)
             ts = int(o.get('updateTime') or o.get('time') or 0); age_ms = str(max(0, int(time.time() * 1000) - ts)) if ts > 0 else '-'
-            vals=[o.get('orderId'),o.get('side'),o.get('price'),o.get('origQty'),o.get('executedQty'),str(rem),o.get('status'),age_ms]
+            side = str(o.get('side', '-'))
+            top_status = 'TOP' if ((side == 'BUY' and self.cs_top_bid_status.text() == 'TOP') or (side == 'SELL' and self.cs_top_ask_status.text() == 'TOP')) else ('WATCH' if str(o.get('status', '')).upper() in ('NEW', 'PARTIALLY_FILLED') else 'IDLE')
+            vals=[side,o.get('price'),o.get('origQty'),o.get('executedQty'),str(rem),age_ms,top_status]
             for c,v in enumerate(vals): self.table.setItem(r,c,QTableWidgetItem(str(v)))
 
     def _risk_ok(self) -> tuple[bool, str]:
@@ -632,11 +642,9 @@ class MainWindow(QMainWindow):
             self.logger.log('INFO', '[RUNTIME] reconcile BUY')
             self.logger.log('INFO', '[RUNTIME] reconcile SELL')
     def _tick_status(self):
-        self._status_badges['SYSTEM'].setText('SYSTEM OK'); self._status_badges['TRADING'].setText(f"TRADING {'ON' if self.cfg.get('trading_enabled',False) else 'OFF'}")
-        self._status_badges['EURI'].setText(f"EURI {self._fmt_bal('EURI_free')} / locked {self._fmt_bal('EURI_locked')}")
-        self._status_badges['USDT'].setText(f"USDT {self._fmt_bal('USDT_free')} / locked {self._fmt_bal('USDT_locked')}")
+        self._status_badges['CONNECTED'].setText(f"CONNECTED {'YES' if self._private_ok else 'NO'}")
         spread=(self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'); self._status_badges['SPREAD'].setText(f'SPREAD {spread}')
-        self._status_badges['HARVEST'].setText('HARVEST READY' if self._private_ok else 'HARVEST NOT_READY')
+        self._status_badges['HARVEST'].setText('HARVEST ACTIVE' if self._live_running else 'HARVEST IDLE')
         self._status_badges['ORDERS'].setText(f'ORDERS {len(self._last_open_orders)}'); self._status_badges['RISK'].setText(f"RISK {'BLOCKED' if self.cfg.get('risk_guard_enabled') else 'OK'}")
         enabled=self._private_ok; self.cancel_all_btn.setEnabled(enabled); self.cancel_selected_btn.setEnabled(enabled and self._selected_order_id is not None)
         self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(True)
@@ -645,8 +653,7 @@ class MainWindow(QMainWindow):
     def _set_label_color(self, label: QLabel, color: str):
         label.setStyleSheet(f'color: {color}; font-weight: 600;')
     def _paint_status(self):
-        self._set_label_color(self._status_badges['SYSTEM'], '#4caf50')
-        self._set_label_color(self._status_badges['TRADING'], '#4caf50' if self.cfg.get('trading_enabled', False) else '#9e9e9e')
+        self._set_label_color(self._status_badges['CONNECTED'], '#4caf50' if self._private_ok else '#f44336')
         spread_state = self._spread_metrics.state.readiness.value if self._spread_metrics else 'NOT_READY'
         self._set_label_color(self._status_badges['SPREAD'], '#4caf50' if spread_state == 'READY' else ('#fbc02d' if spread_state == 'WATCH' else '#9e9e9e'))
         risk_ok, _ = self._risk_ok()
@@ -660,7 +667,13 @@ class MainWindow(QMainWindow):
         if not self._private_ok and not self._balances: return '-'
         return f"{Decimal(str(self._balances.get(k,0))):.2f}"
     def _on_order_selected(self):
-        it=self.table.item(self.table.currentRow(),0); self._selected_order_id=int(it.text()) if it else None
+        row = self.table.currentRow()
+        if row < 0:
+            self._selected_order_id = None
+            return
+        if row < len(self._last_open_orders):
+            order_id = self._last_open_orders[row].get('orderId')
+            self._selected_order_id = int(order_id) if order_id else None
     def _market_bid(self): return f"{Decimal(str(self._last_market_snapshot.get('bid',0))):.8f}"
     def _market_ask(self): return f"{Decimal(str(self._last_market_snapshot.get('ask',0))):.8f}"
     def _balance_euri(self): return f"{Decimal(str(self._balances.get('EURI_free',0))):.8f}"
@@ -727,6 +740,16 @@ class MainWindow(QMainWindow):
         except Exception as e: self.logger.log('ERROR',f'cancel all failed: {e}')
     def start_polling(self): self.polling.start(); self.runtime.set_polling(True)
     def _all_data_text(self, group):
+        if group == 'Account':
+            return f"EURI_free={self._balances.get('EURI_free', '-')}\nEURI_locked={self._balances.get('EURI_locked', '-')}\nUSDT_free={self._balances.get('USDT_free', '-')}\nUSDT_locked={self._balances.get('USDT_locked', '-')}"
+        if group == 'Market':
+            return f"bid={self._last_market_snapshot.get('bid', '-')}\nask={self._last_market_snapshot.get('ask', '-')}\nlast={self._last_market_snapshot.get('last', '-')}\nspread_readiness={self._spread_metrics.state.readiness.value if self._spread_metrics else '-'}"
+        if group == 'Runtime':
+            return f"cycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}"
+        if group == 'Orders':
+            return '\n'.join([f"id={o.get('orderId')} side={o.get('side')} price={o.get('price')} qty={o.get('origQty')} exec={o.get('executedQty')} status={o.get('status')}" for o in self._last_open_orders]) or 'No open orders'
+        if group == 'Execution':
+            return f"reprice_throttle_sec={self._reprice_throttle_sec}\norder_visibility_grace_sec={self._order_visibility_grace_sec}\norders_live_interval={self._orders_live_interval_sec}\nbalance_live_interval={self._balance_live_interval_sec}"
         if group == 'Filters':
             f = self._exchange_filters
             return f"symbol={self.cfg.get('symbol','EURIUSDT')}\ntickSize={f.get('tickSize','-')}\nstepSize={f.get('stepSize','-')}\nminQty={f.get('minQty','-')}\nmaxQty={f.get('maxQty','-')}\nminNotional={f.get('minNotional','-')}"
