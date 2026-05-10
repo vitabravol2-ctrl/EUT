@@ -36,7 +36,7 @@ PAIR_REGISTRY: dict[str, PairConfig] = {
     'BTCU': PairConfig(
         symbol='BTCU',
         base_asset='BTC',
-        quote_asset='USDT',
+        quote_asset='U',
         profile='FAST_COMPETITIVE',
         default_spread_ticks=1,
         default_stable_ms=500,
@@ -47,10 +47,39 @@ PAIR_REGISTRY: dict[str, PairConfig] = {
     ),
 }
 
+KNOWN_QUOTES = ('USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD', 'TRY', 'EUR', 'USD', 'BTC', 'ETH', 'BNB', 'U')
+
+
+def split_symbol_assets(symbol: str) -> tuple[str, str]:
+    key = str(symbol or '').upper().strip()
+    if not key:
+        return 'EURI', 'USDT'
+    for quote in KNOWN_QUOTES:
+        if key.endswith(quote) and len(key) > len(quote):
+            return key[:-len(quote)], quote
+    if len(key) >= 2:
+        return key[:-1], key[-1]
+    return key, 'USDT'
+
 
 def get_pair_config(symbol: str) -> PairConfig:
     key = str(symbol or 'EURIUSDT').upper()
-    return PAIR_REGISTRY.get(key, PAIR_REGISTRY['EURIUSDT'])
+    if key in PAIR_REGISTRY:
+        return PAIR_REGISTRY[key]
+    base_asset, quote_asset = split_symbol_assets(key)
+    default = PAIR_REGISTRY['EURIUSDT']
+    return PairConfig(
+        symbol=key,
+        base_asset=base_asset,
+        quote_asset=quote_asset,
+        profile=default.profile,
+        default_spread_ticks=default.default_spread_ticks,
+        default_stable_ms=default.default_stable_ms,
+        aggressive_reprice=default.aggressive_reprice,
+        top_check_interval_sec=default.top_check_interval_sec,
+        top_hold_patience_sec=default.top_hold_patience_sec,
+        quote_refresh_interval_sec=default.quote_refresh_interval_sec,
+    )
 
 
 def list_pairs() -> list[str]:

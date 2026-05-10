@@ -102,7 +102,9 @@ class MainWindow(QMainWindow):
         self._pending_buy_grace_until=0.0; self._pending_buy_order=None
         self._pending_sell_grace_until=0.0; self._pending_sell_order=None
         self._order_visibility_grace_sec=3.0
-        self._last_reprice_at=0.0; self._reprice_throttle_sec=self._pair_config.top_check_interval_sec
+        self._last_reprice_at=0.0
+        max_reprice_per_sec = float(self.cfg.get('max_reprice_per_sec', 0) or 0)
+        self._reprice_throttle_sec=(1.0 / max_reprice_per_sec) if max_reprice_per_sec > 0 else self._pair_config.top_check_interval_sec
         self._fill_observation=None; self._last_fill_possible=None; self._last_slow_market=None
         self._live_running=False; self._live_confirmed=False; self._buy_started_at=0.0; self._sell_started_at=0.0; self._last_wait_log_at=0.0; self._cycle_started_at=time.time(); self._last_fill_time='-'
         self._log_throttle_until={}; self._runtime_label_cache={}; self._runtime_label_last_update=0.0
@@ -172,7 +174,8 @@ class MainWindow(QMainWindow):
         self.cfg['min_spread_ticks'] = self._pair_config.default_spread_ticks
         self.cfg['reprice_on_move'] = self._pair_config.aggressive_reprice
         self.market.set_symbol(symbol); self.orders.set_symbol(symbol); self.account.set_assets(self._pair_config.base_asset, self._pair_config.quote_asset)
-        self._reprice_throttle_sec = self._pair_config.top_check_interval_sec
+        max_reprice_per_sec = float(self.cfg.get('max_reprice_per_sec', 0) or 0)
+        self._reprice_throttle_sec = (1.0 / max_reprice_per_sec) if max_reprice_per_sec > 0 else self._pair_config.top_check_interval_sec
         self._orders_live_interval_sec = self._pair_config.quote_refresh_interval_sec
         self.logger.log('INFO', f"[PAIR] profile {self._pair_config.profile}")
         self._load_exchange_filters()
@@ -490,7 +493,9 @@ class MainWindow(QMainWindow):
                 else:
                     ob = self._orders_by_id.get(c.buy_order_id, {})
                     working_price = Decimal(str(ob.get('price') or bid))
-                    if bid != working_price:
+                    min_reprice_ticks = Decimal(str(self.cfg.get('minimum_reprice_ticks', 1)))
+                    tick_move = abs(bid - working_price) / tick if tick > 0 else Decimal('0')
+                    if bid != working_price and tick_move >= min_reprice_ticks:
                         self.cs_top_bid_status.setText('OUTBID')
                         self.logger.log('INFO', '[BUY] outbid')
                         if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
@@ -499,7 +504,7 @@ class MainWindow(QMainWindow):
                             try:
                                 self.orders.cancel(c.buy_order_id)
                             except Exception as e:
-                                self.logger.log('INFO', f'[RUNTIME] reconcile BUY cancel race -> {e}')
+                                self.logger.log('INFO', '[RUNTIME] cancel race ignored')
                             c.buy_order_id = None
                             self._active_buy_order_id = None
                             self.logger.log('INFO', '[RUNTIME] repost continue')
@@ -589,7 +594,7 @@ class MainWindow(QMainWindow):
                     if target_sell_qty > 0 and ask == working_price and qty_delta < min_resize_delta:
                         pass
                         pass
-                    elif target_sell_qty > 0 and ask != working_price:
+                    elif target_sell_qty > 0 and ask != working_price and (abs(ask - working_price) / tick if tick > 0 else Decimal('0')) >= Decimal(str(self.cfg.get('minimum_reprice_ticks', 1))):
                         self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={ask}')
                         self.orders.cancel(c.sell_order_id)
                         c.sell_order_id = None
@@ -656,7 +661,9 @@ class MainWindow(QMainWindow):
                 else:
                     os = self._orders_by_id.get(c.sell_order_id, {})
                     working_price = Decimal(str(os.get('price') or ask))
-                    if available_sell_qty > Decimal('0') and ask != working_price and ask > 0:
+                    min_reprice_ticks = Decimal(str(self.cfg.get('minimum_reprice_ticks', 1)))
+                    tick_move = abs(ask - working_price) / tick if tick > 0 else Decimal('0')
+                    if available_sell_qty > Decimal('0') and ask != working_price and ask > 0 and tick_move >= min_reprice_ticks:
                         self.cs_top_ask_status.setText('UNDERCUT')
                         if self._sell_top_state == 'TOP':
                             self.logger.log('INFO', '[SELL] top lost')
@@ -668,7 +675,7 @@ class MainWindow(QMainWindow):
                             try:
                                 self.orders.cancel(c.sell_order_id)
                             except Exception as e:
-                                self.logger.log('INFO', f'[RUNTIME] reconcile SELL cancel race -> {e}')
+                                self.logger.log('INFO', '[RUNTIME] cancel race ignored')
                             c.sell_order_id = None
                             self._active_sell_order_id = None
                             self.logger.log('INFO', '[RUNTIME] repost continue')
@@ -828,7 +835,7 @@ class MainWindow(QMainWindow):
         if group == 'Runtime':
             inv=self._inventory_metrics()
             pressure='EURI' if inv['ratio']>Decimal(str(self.cfg.get('target_inventory_ratio',0.5))) else 'USDT'
-            return f"cycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_usdt={inv['portfolio']:.2f}\ninventory_ratio_euri={inv['ratio']*100:.2f}%\ninventory_ratio_usdt={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}"
+            return f"pair_profile={self._pair_config.profile}\nbase_asset={self._pair_config.base_asset}\nquote_asset={self._pair_config.quote_asset}\ncycle_state={self._cycle.state.value}\nactive_buy_id={self._active_buy_order_id}\nactive_sell_id={self._active_sell_order_id}\nlive_running={self._live_running}\nprivate_ok={self._private_ok}\nportfolio_usdt={inv['portfolio']:.2f}\ninventory_ratio_euri={inv['ratio']*100:.2f}%\ninventory_ratio_usdt={(Decimal('1')-inv['ratio'])*100:.2f}%\ndynamic_buy_exposure_mult={inv['buy_mult']:.2f}\ndynamic_sell_exposure_mult={inv['sell_mult']:.2f}\ninventory_pressure={pressure}\nadaptive_multiplier_delta={abs(inv['buy_mult']-Decimal('1')):.2f}"
         if group == 'Orders':
             return '\n'.join([f"id={o.get('orderId')} side={o.get('side')} price={o.get('price')} qty={o.get('origQty')} exec={o.get('executedQty')} status={o.get('status')}" for o in self._last_open_orders]) or 'No open orders'
         if group == 'Execution':
