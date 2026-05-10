@@ -1015,8 +1015,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                 self._pending_buy_order = None
                 self._pending_buy_grace_until = 0.0
                 self.logger.log('INFO', '[EXIT] buy cancelled')
+            if exit_only_mode:
+                self.logger.log('INFO', '[EXIT] buy branch disabled')
             if net_inv < max_long and available_buy_usdt >= max(min_buy_free, buy_quote):
-                if not buy_allowed:
+                if exit_only_mode:
+                    pass
+                elif not buy_allowed:
                     if exit_only_mode:
                         self.logger.log('RISK', 'buy blocked: inventory heavy')
                     else:
@@ -1071,7 +1075,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self._buy_started_at = time.time()
                         self._quote_birth[c.buy_order_id] = time.time()
                         self._ui_model_set('cs_top_bid_status', 'WORKING')
-                else:
+                elif buy_allowed:
                     ob = self._orders_by_id.get(c.buy_order_id, {})
                     working_price = Decimal(str(ob.get('price') or bid))
                     min_reprice_ticks = Decimal(str(self.cfg.get('minimum_buy_reprice_ticks', self.cfg.get('minimum_reprice_ticks', 1))))
@@ -1180,7 +1184,7 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                         self._sell_capacity_signature = capacity_signature
                     min_resize_delta_cfg = Decimal(str(self.cfg.get('min_resize_delta_euri', 1.0)))
                     min_resize_delta = max(step * Decimal('5'), Decimal(str(self.cfg.get('min_partial_fill_euri', 0))), min_resize_delta_cfg)
-                    if c.sell_order_id and c.sell_order_id in open_order_ids and ask > 0 and not sell_grace_active:
+                    if c.sell_order_id and c.sell_order_id in open_order_ids and ask > 0 and not sell_grace_active and not exit_only_mode:
                         os = self._orders_by_id.get(c.sell_order_id, {})
                         working_price = Decimal(str(os.get('price') or ask))
                         working_qty = floor_to_step(max(Decimal('0'), Decimal(str(os.get('origQty') or '0')) - Decimal(str(os.get('executedQty') or '0'))), step)
@@ -1242,16 +1246,14 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                                 sell_age = max(0, time.time() - self._sell_started_at) if self._sell_started_at else 0
                                 emergency_loss_ticks = Decimal(str(self.cfg.get('emergency_loss_ticks', 50) or 50))
                                 emergency_floor = c.buy_avg_price - (emergency_loss_ticks * tick)
-                                if sell_age >= 60:
-                                    min_exit = max(ask - (Decimal(str(self.cfg.get('exit_aggr_ticks', 0))) * tick), emergency_floor)
-                                    self.logger.log('INFO', f'[EXIT] emergency unload target={min_exit}')
-                                elif sell_age >= 30:
-                                    min_exit = c.buy_avg_price
-                                    self.logger.log('INFO', '[EXIT] relax target=breakeven')
-                                elif sell_age >= 15:
-                                    min_exit = c.buy_avg_price + tick
-                                    self.logger.log('INFO', '[EXIT] relax target=breakeven+1')
-                            self.logger.log('INFO', f'[SELL] TP protected qty={sell_qty} price={min_exit}') if ask < min_exit else None
+                                min_exit = self._exit_only_target_price(
+                                    ask=ask,
+                                    best_bid=bid,
+                                    avg_buy=c.buy_avg_price,
+                                    tick=tick,
+                                    sell_age=sell_age,
+                                    emergency_floor=emergency_floor,
+                                )
                             try:
                                 resp = self._place_safe_maker_sell(sell_qty, min_exit, reason='run_live_cycle')
                                 if not resp:
@@ -1289,49 +1291,63 @@ QPushButton#btn_info:pressed { background: #184f9a; }
                             sell_age = max(0, time.time() - self._sell_started_at) if c.sell_order_id else 0
                             emergency_loss_ticks = Decimal(str(self.cfg.get('emergency_loss_ticks', 50) or 50))
                             emergency_floor = c.buy_avg_price - (emergency_loss_ticks * tick)
-                            if sell_age >= 60:
-                                min_exit = max(ask - (Decimal(str(self.cfg.get('exit_aggr_ticks', 0))) * tick), emergency_floor)
-                                self.logger.log('INFO', f'[EXIT] emergency unload target={min_exit}')
-                            elif sell_age >= 30:
-                                min_exit = c.buy_avg_price
-                                self.logger.log('INFO', '[EXIT] relax target=breakeven')
-                            elif sell_age >= 15:
-                                min_exit = c.buy_avg_price + tick
-                                self.logger.log('INFO', '[EXIT] relax target=breakeven+1')
-                        protected_ask = max(ask, min_exit)
-                        tick_move = abs(protected_ask - working_price) / tick if tick > 0 else Decimal('0')
-                        quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
-                        min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
-                        if ask < min_exit:
-                            self.logger.log('INFO', '[SELL] TP protected')
-                            self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
-                        elif available_sell_qty > Decimal('0') and protected_ask != working_price and protected_ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
-                            if working_price >= min_exit and protected_ask < working_price:
-                                self.logger.log('INFO', '[SELL] TP protected')
-                                self._sell_top_state = 'TOP'
-                                return
-                            self._ui_model_set('cs_top_ask_status', 'UNDERCUT')
-                            if self._sell_top_state == 'TOP':
-                                self.logger.log('INFO', '[SELL] top lost')
-                            self._sell_top_state = 'UNDERCUT'
-                            self.logger.log('INFO', '[SELL] undercut')
-                            if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
-                                self._ui_model_set('cs_top_ask_status', 'REPRICING')
-                                self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={protected_ask}')
+                            min_exit = self._exit_only_target_price(
+                                ask=ask,
+                                best_bid=bid,
+                                avg_buy=c.buy_avg_price,
+                                tick=tick,
+                                sell_age=sell_age,
+                                emergency_floor=emergency_floor,
+                            )
+                            self.logger.log('INFO', f'[EXIT] sell age={int(sell_age)}s target={min_exit} current={working_price}')
+                            if working_price > (min_exit + tick):
+                                self.logger.log('INFO', f'[EXIT] repost sell current={working_price} target={min_exit}')
                                 try:
                                     self.orders.cancel(c.sell_order_id)
-                                except Exception as e:
+                                except Exception:
                                     self.logger.log('INFO', '[RUNTIME] cancel race ignored')
                                 self._quote_birth.pop(c.sell_order_id, None)
                                 c.sell_order_id = None
                                 self._active_sell_order_id = None
-                                self.logger.log('INFO', '[RUNTIME] repost continue')
-                                self._last_reprice_at = time.time()
+                                self._pending_sell_order = None
+                                self._pending_sell_grace_until = 0.0
+                            else:
+                                self.logger.log('INFO', '[EXIT] holding sell target ok')
                         else:
-                            self._ui_model_set('cs_top_ask_status', 'TOP')
-                            if self._sell_top_state != 'TOP':
-                                self.logger.log('INFO', '[SELL] top acquired')
-                            self._sell_top_state = 'TOP'
+                            protected_ask = max(ask, min_exit)
+                            tick_move = abs(protected_ask - working_price) / tick if tick > 0 else Decimal('0')
+                            quote_age_ms = int((time.time() - self._quote_birth.get(c.sell_order_id, 0.0)) * 1000) if c.sell_order_id else 0
+                            min_quote_lifetime_ms = int(self.cfg.get('minimum_sell_quote_lifetime_ms', self.cfg.get('minimum_quote_lifetime_ms', 0)) or 0)
+                            if ask < min_exit:
+                                self.logger.log('INFO', '[SELL] TP protected')
+                                self.logger.log('INFO', '[SELL] reprice blocked below profitable exit')
+                            elif available_sell_qty > Decimal('0') and protected_ask != working_price and protected_ask > 0 and tick_move >= min_reprice_ticks and quote_age_ms >= min_quote_lifetime_ms:
+                                if working_price >= min_exit and protected_ask < working_price:
+                                    self.logger.log('INFO', '[SELL] TP protected')
+                                    self._sell_top_state = 'TOP'
+                                    return
+                                self._ui_model_set('cs_top_ask_status', 'UNDERCUT')
+                                if self._sell_top_state == 'TOP':
+                                    self.logger.log('INFO', '[SELL] top lost')
+                                self._sell_top_state = 'UNDERCUT'
+                                self.logger.log('INFO', '[SELL] undercut')
+                                if (time.time() - self._last_reprice_at) >= self._reprice_throttle_sec:
+                                    self._ui_model_set('cs_top_ask_status', 'REPRICING')
+                                    self.logger.log('INFO', f'[SELL] reposting best_ask old={working_price} new={protected_ask}')
+                                    try:
+                                        self.orders.cancel(c.sell_order_id)
+                                    except Exception as e:
+                                        self.logger.log('INFO', '[RUNTIME] cancel race ignored')
+                                    self._quote_birth.pop(c.sell_order_id, None)
+                                    c.sell_order_id = None
+                                    self._active_sell_order_id = None
+                                    self.logger.log('INFO', '[RUNTIME] repost continue')
+                                    self._last_reprice_at = time.time()
+                            else:
+                                self._ui_model_set('cs_top_ask_status', 'TOP')
+                                if self._sell_top_state != 'TOP':
+                                    self.logger.log('INFO', '[SELL] top acquired')
+                                self._sell_top_state = 'TOP'
     
             except Exception as e:
                 self.logger.log('ERROR', 'sell branch failed:\n' + traceback.format_exc())
@@ -1345,6 +1361,16 @@ QPushButton#btn_info:pressed { background: #184f9a; }
 
     def _ui_model_set(self, key: str, value):
         self._ui_model[key] = str(value)
+
+    def _exit_only_target_price(self, *, ask: Decimal, best_bid: Decimal, avg_buy: Decimal, tick: Decimal, sell_age: float, emergency_floor: Decimal) -> Decimal:
+        target_profit_ticks = Decimal(str(self.cfg.get('target_profit_ticks', 1)))
+        if sell_age < 15:
+            return avg_buy + (target_profit_ticks * tick)
+        if sell_age < 30:
+            return avg_buy + tick
+        if sell_age < 60:
+            return avg_buy
+        return max(best_bid + tick, emergency_floor)
 
     def _inventory_metrics(self):
         bid = Decimal(str(self._last_market_snapshot.get('bid', 0) or 0))
