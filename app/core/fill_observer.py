@@ -24,9 +24,18 @@ class FillObservation:
 
 
 class FillObserver:
-    def __init__(self, min_spread_ticks: int, stable_ms: int, now_fn: Callable[[], float] | None = None) -> None:
+    def __init__(
+        self,
+        min_spread_ticks: int,
+        stable_ms: int,
+        fill_window_ms: int | None = None,
+        block_high_activity: bool = False,
+        now_fn: Callable[[], float] | None = None,
+    ) -> None:
         self.min_spread_ticks = max(min_spread_ticks, 1)
         self.stable_ms = max(stable_ms, 1)
+        self.fill_window_ms = max(fill_window_ms if fill_window_ms is not None else self.stable_ms, 1)
+        self.block_high_activity = bool(block_high_activity)
         self._now_fn = now_fn or time
         self._last_bid: Decimal | None = None
         self._last_ask: Decimal | None = None
@@ -50,7 +59,8 @@ class FillObserver:
         fill_possible = (
             spread_ticks >= Decimal(self.min_spread_ticks)
             and spread_lifetime_ms >= self.stable_ms
-            and fill_window_ms >= self.stable_ms
+            and fill_window_ms >= self.fill_window_ms
+            and (not self.block_high_activity or activity != MarketActivity.HIGH)
         )
 
         return FillObservation(
