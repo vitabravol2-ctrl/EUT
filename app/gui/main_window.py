@@ -746,42 +746,33 @@ QPushButton#btn_info:pressed { background: #184f9a; }
         del blocker
 
     def _update_harvest_button(self):
-        state = 'OFF'
-        color = '#9e9e9e'
-        if not self._private_ok and self._live_running:
-            state = 'BLOCKED'
-            color = '#f44336'
-        elif self._live_running:
-            state = 'ON'
-            color = '#4caf50'
-        elif self._cycle.state == CycleState.WAIT_READY:
-            state = 'WAITING'
-            color = '#fbc02d'
-        self.start_button.setText(f'HARVEST {state}')
+        is_on = bool(self._live_running or self.start_button.isChecked())
+        text = 'HARVEST ON' if is_on else 'HARVEST OFF'
+        color = '#1e7f3e' if is_on else '#aa2e25'
+        self.start_button.setText(text)
         self.start_button.setStyleSheet(f'background: {color}; font-weight: 700;')
-        self._set_harvest_button_checked(self._live_running)
+        self._set_harvest_button_checked(is_on)
 
     def toggle_harvest(self, checked: bool):
         if checked:
-            self.start_harvest()
+            self.logger.log('INFO', '[GUI] HARVEST toggle ON')
+            try:
+                self._start_live_runtime()
+            except Exception as e:
+                self._set_harvest_button_checked(False)
+                self.logger.log('ERROR', f'[ERROR] GUI action failed action=HARVEST_ON error={e}')
         else:
-            self.stop_harvest()
+            self.logger.log('INFO', '[GUI] HARVEST toggle OFF')
+            self._stop_live_runtime()
 
     def start_harvest(self):
-        try:
-            self.logger.log('INFO', '[GUI] HARVEST toggle ON')
-            self.logger.log('INFO', f'[GUI] private_ok={self._private_ok} live={self._live_running}')
-            debug_force = bool(globals().get("DEBUG_FORCE_START", False))
-            if not self._private_ok and not debug_force:
-                self.logger.log('RISK', '[RISK] blocked: not connected')
-                self._set_harvest_button_checked(False)
-                return
-            if debug_force:
-                self.logger.log('INFO', '[GUI] DEBUG_FORCE_START direct runtime call')
-            self._start_live_runtime()
-        except Exception as e:
-            self._set_harvest_button_checked(False)
-            self.logger.log('ERROR', f'[ERROR] GUI action failed action=HARVEST_ON error={e}')
+        self._set_harvest_button_checked(True)
+        self.toggle_harvest(True)
+
+    def stop_harvest(self):
+        self._set_harvest_button_checked(False)
+        self.toggle_harvest(False)
+
 
     def _start_live_runtime(self):
         try:
@@ -801,12 +792,11 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self.logger.log('ERROR', f'[ERROR] start runtime failed: {e}')
             raise
 
-    def stop_harvest(self):
+    def _stop_live_runtime(self):
         try:
             self._live_running = False
             if hasattr(self, 'live_timer') and self.live_timer and self.live_timer.isActive():
                 self.live_timer.stop()
-            self.logger.log('INFO', '[GUI] HARVEST toggle OFF')
             self.logger.log('INFO', '[LIVE] runtime stopped')
             self._runtime_active = False
             if self._cycle.state == CycleState.ERROR:
@@ -1335,7 +1325,12 @@ QPushButton#btn_info:pressed { background: #184f9a; }
             self._last_inventory_log_signature=sig
         enabled=self._private_ok; self.cancel_all_btn.setEnabled(enabled); self.cancel_selected_btn.setEnabled(enabled and self._selected_order_id is not None)
         self._update_runtime_stats_from_ledger(); self._safe_label_set(self.ts_runtime, f"{int(time.time()-self._session_started_at)}s"); self._safe_label_set(self.cs_data_source, self._data_mode); self._safe_label_set(self.cs_open_orders, str(len(self._last_open_orders))); inv=self._inventory_metrics(); mode,risk,_=self._inventory_risk_state(inv['ratio']); self._safe_label_set(self.cs_reason, f"mode={mode} risk={risk} ratio={inv['ratio']*100:.1f}% exit_wait={int(max(0,time.time()-self._sell_started_at)) if self._active_sell_order_id else 0}s")
-        self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(False); self._update_harvest_button()
+        filters_ok = bool(self.get_symbol_filters())
+        market_data_ok = bool(self._last_market_ts > 0)
+        harvest_enabled = bool(self._private_ok and filters_ok and market_data_ok)
+        self.start_harvest_btn.setEnabled(harvest_enabled)
+        self.stop_harvest_btn.setEnabled(harvest_enabled)
+        self._update_harvest_button()
         self._paint_status()
 
     def _apply_ui_model_to_widgets(self):
