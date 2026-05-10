@@ -195,13 +195,47 @@ class MainWindow(QMainWindow):
 
     def _btn(self,t,f): b=QPushButton(t); b.clicked.connect(f); return b
     def _startup_connect_flow(self):
-        self._load_exchange_filters()
-        self.refresh_market(True)
-        self.refresh_balances(True)
-        self.refresh_orders(True)
-        self.start_polling()
+        self._bootstrap_sequence()
+
+    def _bootstrap_sequence(self):
+        self.logger.log('INFO', '[BOOT] start')
+        steps = (
+            ('load filters', self._load_exchange_filters),
+            ('market snapshot', self._bootstrap_market_snapshot),
+            ('balances refresh', self._bootstrap_balances_refresh),
+            ('open orders refresh', self._bootstrap_open_orders_refresh),
+            ('polling start', self.start_polling),
+        )
+        for step_name, step_fn in steps:
+            self.logger.log('INFO', f'[BOOT] {step_name}')
+            try:
+                result = step_fn()
+                if result is False:
+                    raise RuntimeError('returned False')
+            except Exception as exc:
+                self._private_ok = False
+                self.logger.log('ERROR', f'[BOOT] failed step={step_name} error={exc}')
+                if step_name == 'balances refresh':
+                    self.logger.log('ERROR', f'[ERROR] account endpoint failed: {exc}')
+                return
         self.logger.log('INFO', '[WS] connecting')
         self.ws.connect()
+        self.logger.log('INFO', '[BOOT] ready')
+
+    def _bootstrap_market_snapshot(self):
+        self._on_task_success('market', self.market.snapshot())
+
+    def _bootstrap_balances_refresh(self):
+        try:
+            payload = self.account.balances(Decimal(str(self._last_market_snapshot.get('last', 0) or 0)))
+        except Exception as exc:
+            if isinstance(exc, BinanceAPIError) and exc.status_code in (401, 403):
+                self.logger.log('ERROR', f'[ERROR] account endpoint failed: HTTP {exc.status_code} {exc}')
+            raise
+        self._on_task_success('balances', payload)
+
+    def _bootstrap_open_orders_refresh(self):
+        self._on_task_success('orders', self.orders.open_orders())
     def open_settings(self): self.settings_dialog=SettingsDialog(self.cfg,self.apply_settings,self.test_connection,self); self.settings_dialog.show()
     def open_trade_settings(self): self.trade_settings_dialog=TradeSettingsDialog(self.cfg,self.apply_trade_settings,self); self.trade_settings_dialog.show()
     def open_manual_order(self): self.manual_order_dialog=ManualOrderDialog(self,self); self.manual_order_dialog.show()
@@ -370,7 +404,7 @@ class MainWindow(QMainWindow):
         if name in ('orders','balances'): self._private_ok=False
     def _sync_open_orders(self, payload):
         prev_count = len(self._last_open_orders)
-        self._last_open_orders = payload; self._private_ok = True
+        self._last_open_orders = payload
         now = time.time()
         must_render = (now - self._orders_gui_last_sync) >= self._orders_gui_interval_sec or len(payload) != prev_count
         if must_render:
@@ -484,6 +518,9 @@ class MainWindow(QMainWindow):
         return True, 'ok'
 
     def start_harvest(self):
+        if not self._private_ok:
+            self.logger.log('RISK', '[RISK] blocked: not connected')
+            return
         if self._cycle.state == CycleState.ERROR:
             self._cycle = HarvestCycle()
             old, new = self._cycle.transition(CycleState.WAIT_READY, 'start reset from error')
@@ -941,7 +978,7 @@ class MainWindow(QMainWindow):
         avg = (self._trade_stats['realized_pnl'] / Decimal(cycles)) if self._trade_stats['cycles'] > 0 else Decimal('0')
         self.ts_total.setText(str(self._trade_stats['total'])); self.ts_buy_fills.setText(str(self._trade_stats['buy_fills'])); self.ts_sell_fills.setText(str(self._trade_stats['sell_fills'])); self.ts_cycles.setText(str(self._trade_stats['cycles'])); self.ts_inventory_sells.setText(str(self._trade_stats['inventory_sells_count'])); self.ts_inventory_qty.setText(f"{self._trade_stats['inventory_sells_qty']:.8f}"); self.ts_inventory_quote.setText(f"{self._trade_stats['inventory_sells_quote']:.8f}"); self.ts_winrate.setText(f"{winrate:.2f}%"); self.ts_realized.setText(f"{self._trade_stats['realized_pnl']:.8f}"); self.ts_avg.setText(f"{avg:.8f}"); self.ts_ticks.setText(f"{self._trade_stats['ticks']:.2f}"); self.ts_fees.setText(f"{self._trade_stats['fees']:.8f}"); self.ts_runtime.setText(f"{int(time.time()-self._session_started_at)}s"); self.cs_data_source.setText(self._data_mode); self.cs_open_orders.setText(str(len(self._last_open_orders)))
         self.cs_trades.setText(str(self._trade_stats['total'])); self.cs_winrate.setText(f"{winrate:.2f}%"); self.cs_pnl.setText(f"{self._trade_stats['realized_pnl']:.8f}")
-        self.start_harvest_btn.setEnabled(True); self.stop_harvest_btn.setEnabled(True)
+        self.start_harvest_btn.setEnabled(self._private_ok); self.stop_harvest_btn.setEnabled(True)
         self._paint_status()
     def _set_label_text(self, label: QLabel | None, value: str):
         if label is None or not isValid(label):
